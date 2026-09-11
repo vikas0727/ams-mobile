@@ -39,6 +39,16 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.digi.R
 
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.utf16CodePoint
+
 private val Ink = Color(0xFF070B12)
 private val Panel = Color(0xFF121A28)
 private val Accent = Color(0xFF2F6BFF)
@@ -61,9 +71,40 @@ fun PairingScreen(
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val focusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(Unit) {
+        focusRequester.requestFocus()
+    }
 
     Box(
-        modifier = modifier.fillMaxSize().background(Ink),
+        modifier = modifier
+            .fillMaxSize()
+            .background(Ink)
+            .focusRequester(focusRequester)
+            .focusable()
+            .onKeyEvent { keyEvent ->
+                if (keyEvent.type == KeyEventType.KeyDown) {
+                    val unicodeChar = keyEvent.nativeKeyEvent.unicodeChar
+                    if (unicodeChar != 0 && unicodeChar.toChar().isLetterOrDigit()) {
+                        viewModel.append(unicodeChar.toChar(), onPaired)
+                        return@onKeyEvent true
+                    }
+                    when (keyEvent.key) {
+                        Key.Backspace -> {
+                            viewModel.backspace()
+                            return@onKeyEvent true
+                        }
+                        Key.Enter, Key.NumPadEnter -> {
+                            if (state.canSubmit) {
+                                viewModel.submit(onPaired)
+                                return@onKeyEvent true
+                            }
+                        }
+                    }
+                }
+                false
+            },
         contentAlignment = Alignment.Center,
     ) {
         Column(
@@ -99,7 +140,7 @@ fun PairingScreen(
                 }
             } else {
                 CharacterGrid(
-                    onChar = viewModel::append,
+                    onChar = { char -> viewModel.append(char, onPaired) },
                     onBackspace = viewModel::backspace,
                     onClear = viewModel::clear,
                 )

@@ -5,24 +5,24 @@ import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
-/**
- * The device-side half of AMS's `Utils/cryptoUtil.js`.
- *
- * The backend transparently AES-256-CBC encrypts every JSON response outside its bypass list, and
- * `/api/v1/player/*` is deliberately not in that list — the manifest carries pre-signed S3 URLs and
- * is worth keeping opaque on a station's public wifi. So the wire shape both ways is
- * `{"data":"<lowercase hex>"}` and this class is what makes it readable.
- *
- * Two details are load-bearing and easy to get wrong:
- *
- *  - The key is **SHA-256 of the secret string**, not the string's bytes. `crypto.createHash(
- *    "sha256").update(String(AES_SECRET_KEY)).digest()` on the server; the same here. Passing the
- *    raw UTF-8 bytes would only work by accident when the secret happens to be 32 bytes long, which
- *    the dev secret is — so it would appear to work in development and fail in production.
- *  - The IV is **fixed and hex-decoded from config**, not random and not prepended to the payload.
- *    A fixed IV is weaker than a per-message one, but changing it is a backend decision: the server
- *    decrypts with `Buffer.from(AES_IV, "hex")` and nothing in the payload tells it otherwise.
- */
+///*
+// * The device-side half of AMS's `Utils/cryptoUtil.js`.
+// *
+// * The backend transparently AES-256-CBC encrypts every JSON response outside its bypass list, and
+// * `/api/v1/player/*` is deliberately not in that list — the manifest carries pre-signed S3 URLs and
+// * is worth keeping opaque on a station's public wifi. So the wire shape both ways is
+// * `{"data":"<lowercase hex>"}` and this class is what makes it readable.
+// *
+// * Two details are load-bearing and easy to get wrong:
+// *
+// *  - The key is **SHA-256 of the secret string**, not the string's bytes. `crypto.createHash(
+// *    "sha256").update(String(AES_SECRET_KEY)).digest()` on the server; the same here. Passing the
+// *    raw UTF-8 bytes would only work by accident when the secret happens to be 32 bytes long, which
+// *    the dev secret is — so it would appear to work in development and fail in production.
+// *  - The IV is **fixed and hex-decoded from config**, not random and not prepended to the payload.
+// *    A fixed IV is weaker than a per-message one, but changing it is a backend decision: the server
+// *    decrypts with `Buffer.from(AES_IV, "hex")` and nothing in the payload tells it otherwise.
+// */
 class AesCipher(secretKey: String, ivHex: String) {
 
     private val key = SecretKeySpec(

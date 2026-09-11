@@ -75,6 +75,13 @@ class PlayerService : Service() {
         if (loopJob == null) {
             loopJob = scope.launch { runLoop() }
             scope.launch { watchNetwork() }
+        } else {
+            scope.launch {
+                if (graph.store.paired.value) {
+                    startUp()
+                    heartbeatCycle()
+                }
+            }
         }
         // STICKY so that a system kill under memory pressure brings the loop back by itself. There
         // is nobody standing at the box to restart it.
@@ -103,8 +110,10 @@ class PlayerService : Service() {
 
             if (sinceHeartbeat >= intervalMs) {
                 sinceHeartbeat = 0
-                runCatching { heartbeatCycle() }
-                    .onFailure { AppLog.e(TAG, "Heartbeat cycle failed", it) }
+                if (graph.store.paired.value) {
+                    runCatching { heartbeatCycle() }
+                        .onFailure { AppLog.e(TAG, "Heartbeat cycle failed", it) }
+                }
             }
 
             runCatching { tick() }.onFailure { AppLog.e(TAG, "Tick failed", it) }
@@ -124,7 +133,7 @@ class PlayerService : Service() {
     private suspend fun startUp() {
         graph.content.restoreCachedPlan()
 
-        if (!graph.pairing.verify()) {
+        if (!graph.store.paired.value || !graph.pairing.verify()) {
             AppLog.w(TAG, "Not paired (or the token was rejected) — the UI will ask for a code")
             return
         }
@@ -139,6 +148,10 @@ class PlayerService : Service() {
     }
 
     private suspend fun heartbeatCycle() {
+        if (!graph.store.paired.value) {
+            AppLog.d(TAG, "Skipping heartbeat cycle: device is not paired")
+            return
+        }
         val beat = graph.heartbeat.beat(PlayerHost.current()?.currentlyPlaying())
         state.value = state.value.copy(
             online = graph.heartbeat.online.value,

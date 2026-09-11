@@ -36,10 +36,14 @@ class PairingViewModel(app: Application) : AndroidViewModel(app) {
     private val _state = MutableStateFlow(UiState(deviceId = graph.pairing.deviceId()))
     val state: StateFlow<UiState> = _state.asStateFlow()
 
-    fun append(char: Char) {
+    fun append(char: Char, onPaired: (() -> Unit)? = null) {
         val state = _state.value
         if (state.busy || state.code.length >= CODE_LENGTH) return
-        _state.value = state.copy(code = state.code + char.uppercaseChar(), error = null)
+        val newCode = state.code + char.uppercaseChar()
+        _state.value = state.copy(code = newCode, error = null)
+        if (newCode.length == CODE_LENGTH && onPaired != null) {
+            submit(onPaired)
+        }
     }
 
     fun backspace() {
@@ -53,9 +57,12 @@ class PairingViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Accepts a pasted or IME-typed value, filtered to the characters a pairing code can contain. */
-    fun setCode(raw: String) {
+    fun setCode(raw: String, onPaired: (() -> Unit)? = null) {
         val cleaned = raw.uppercase().filter { it.isLetterOrDigit() }.take(CODE_LENGTH)
         _state.value = _state.value.copy(code = cleaned, error = null)
+        if (cleaned.length == CODE_LENGTH && onPaired != null) {
+            submit(onPaired)
+        }
     }
 
     fun submit(onPaired: () -> Unit) {
