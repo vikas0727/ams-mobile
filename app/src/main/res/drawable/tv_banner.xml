@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 320x180 leanback banner. Vector so it scales on every TV density without shipping five PNGs. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+    <path
+        android:fillColor="#0B1220"
+        android:pathData="M0,0h320v180h-320z" />
+    <path
+        android:fillColor="#2F6BFF"
+        android:pathData="M96,54h128a10,10 0 0 1 10,10v52a10,10 0 0 1 -10,10h-128a10,10 0 0 1 -10,-10v-52a10,10 0 0 1 10,-10z" />
+    <path
+        android:fillColor="#0B1220"
+        android:pathData="M140,74l44,26l-44,26z" />
+    <path
+        android:fillColor="#2F6BFF"
+        android:pathData="M146,134h28v8h-28z" />
+</vector>

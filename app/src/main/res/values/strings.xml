@@ -1,3 +1,20 @@
 <resources>
-    <string name="app_name">Digi</string>
+    <string name="app_name">AMS Player</string>
+
+    <string name="pair_title">Pair this screen</string>
+    <string name="pair_subtitle">Enter the 6-character pairing code from the AMS portal</string>
+    <string name="pair_action">Pair</string>
+    <string name="pair_working">Pairing…</string>
+    <string name="pair_device_id">Device ID</string>
+
+    <string name="player_no_content">Waiting for content</string>
+    <string name="player_no_content_hint">This screen is paired but nothing is scheduled right now.</string>
+    <string name="player_downloading">Downloading content…</string>
+
+    <string name="notif_channel_name">Playback</string>
+    <string name="notif_channel_desc">Keeps the player running and reporting to the AMS portal</string>
+    <string name="notif_title">AMS Player</string>
+
+    <string name="diag_title">Diagnostics</string>
+    <string name="diag_close">Close</string>
 </resources>

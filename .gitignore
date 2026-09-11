@@ -1,36 +1,11 @@
-# Gradle
-.gradle/
-build/
-*/build/
-
-# Android Studio
-.idea/
 *.iml
-
-# Local configuration file
-local.properties
-
-# Generated files
-captures/
-.externalNativeBuild/
-.cxx/
-
-# APK files
-*.apk
-*.aab
-
-# Keystore files
-*.jks
-*.keystore
-
-# macOS
+.gradle
+/local.properties
+/.idea
 .DS_Store
-
-# Kotlin
-.kotlin/
-
-# Build outputs
-outputs/
-
-# Firebase
-google-services.json
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+/app/schemas

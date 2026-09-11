@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Policies claimed by DeviceAdminReceiver. Kept to the minimum the remote commands actually use:
+    a signage player has no business asking for storage encryption or password policy, and an
+    over-broad admin is the kind of thing that gets an APK refused by a site's IT department.
+-->
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <force-lock />
+        <reset-password />
+    </uses-policies>
+</device-admin>

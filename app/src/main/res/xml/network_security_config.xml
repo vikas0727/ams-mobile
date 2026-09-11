@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Cleartext is permitted so the player can talk to a development backend on http://<lan-ip>:5000
+    and to the loopback alias an emulator uses. Production S3 media and a production API are HTTPS;
+    tighten this to <domain-config cleartextTrafficPermitted="false"> once the deployment has a
+    certificate.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
