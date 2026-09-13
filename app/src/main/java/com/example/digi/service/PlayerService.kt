@@ -170,6 +170,18 @@ class PlayerService : Service() {
 
         applySettings(beat.settings)
 
+        if (beat.captureJustEnabled) {
+            // Put a line in the Logs tab immediately. An operator who has just switched Live Data
+            // View on and sees nothing has no way to tell "capture is working, nothing has happened
+            // yet" from "capture is broken" — and the first real playlist_event may be a whole
+            // slide away.
+            graph.events.appEvent(
+                action = AmsConstants.LogAction.SETTINGS_APPLIED,
+                status = "Live capture enabled — player is now streaming events",
+            )
+            graph.events.flush()
+        }
+
         if (beat.contentStale) {
             graph.content.sync()
         }

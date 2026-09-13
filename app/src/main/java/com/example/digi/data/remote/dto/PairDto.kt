@@ -51,4 +51,6 @@ data class MeResponse(
     val contentVersion: Int? = null,
     val serverTime: String? = null,
     val heartbeatIntervalSeconds: Int? = null,
+    /** So a player that just restarted picks capture up at boot rather than waiting a beat. */
+    val realtimeCaptureEnabled: Boolean? = null,
 )

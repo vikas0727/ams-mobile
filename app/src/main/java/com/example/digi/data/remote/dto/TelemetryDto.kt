@@ -46,6 +46,16 @@ data class HeartbeatResponse(
     val pendingCommands: Int = 0,
     val settings: SettingsDto? = null,
     val heartbeatIntervalSeconds: Int? = null,
+    /**
+     * Whether an operator has the Logs tab watching this screen.
+     *
+     * Also delivered as the START/STOP_REALTIME_EVENT_CAPTURE commands, but those are at-most-once
+     * — the server marks a command delivered before this device has acted on it. Carrying the flag
+     * on every beat makes capture self-correcting instead of depending on one command arriving.
+     * Null from an older backend, which is why the player treats null as "no opinion" rather than
+     * as false.
+     */
+    val realtimeCaptureEnabled: Boolean? = null,
 )
 
 /**

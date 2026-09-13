@@ -110,6 +110,7 @@ class PairingRepository(
                 store.orientation = me.orientation
                 store.saveSettings(me.settings)
                 me.heartbeatIntervalSeconds?.let { store.heartbeatIntervalSeconds = it }
+                me.realtimeCaptureEnabled?.let { store.realtimeCaptureEnabled = it }
                 true
             }
 

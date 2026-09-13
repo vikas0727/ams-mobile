@@ -35,6 +35,10 @@ class HeartbeatRepository(
         val contentStale: Boolean,
         val pendingCommands: Int,
         val settings: SettingsDto?,
+        /** True only on the beat where the Logs tab was switched on, so the caller can emit a
+         *  marker event and flush at once — an empty Logs tab is otherwise indistinguishable from
+         *  a broken one. */
+        val captureJustEnabled: Boolean = false,
     )
 
     private val _online = MutableStateFlow(false)
@@ -63,6 +67,7 @@ class HeartbeatRepository(
                 store.lastHeartbeatOkAt = ServerClock.now()
                 store.saveSettings(body.settings)
                 body.heartbeatIntervalSeconds?.let { store.heartbeatIntervalSeconds = it }
+                val captureJustEnabled = applyCaptureFlag(body.realtimeCaptureEnabled)
                 _online.value = true
                 _lastError.value = null
 
@@ -72,7 +77,7 @@ class HeartbeatRepository(
                         "Server has v${body.contentVersion}, this screen holds v${store.contentVersion} — re-syncing"
                     )
                 }
-                Beat(body.contentStale, body.pendingCommands, body.settings)
+                Beat(body.contentStale, body.pendingCommands, body.settings, captureJustEnabled)
             }
 
             is ApiResult.Unauthorized -> {
@@ -93,6 +98,20 @@ class HeartbeatRepository(
                 null
             }
         }
+    }
+
+    /**
+     * Keep local log capture in step with what the CMS thinks.
+     *
+     * Null means an older backend that does not send the field — leave whatever the commands set,
+     * rather than silently turning capture off on a fleet whose server has not been updated yet.
+     */
+    private fun applyCaptureFlag(enabled: Boolean?): Boolean {
+        if (enabled == null) return false
+        if (enabled == store.realtimeCaptureEnabled) return false
+        store.realtimeCaptureEnabled = enabled
+        AppLog.i(TAG, if (enabled) "Live event capture ON (per heartbeat)" else "Live event capture OFF (per heartbeat)")
+        return enabled
     }
 
     /** Seconds between beats, as the server most recently specified (SCREEN_OFFLINE_AFTER_SECONDS / 3). */

@@ -1,5 +1,6 @@
 package com.example.digi.ui.player
 
+import android.view.LayoutInflater
 import android.view.ViewGroup
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
@@ -23,6 +24,7 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.example.digi.R
 import com.example.digi.core.AppLog
 import com.example.digi.player.PlanSlide
 import com.example.digi.player.PlaybackEngine
@@ -133,7 +135,12 @@ private fun VideoSlide(slide: PlanSlide, startAtMs: Long, muted: Boolean) {
 
     AndroidView(
         factory = { ctx ->
-            PlayerView(ctx).apply {
+            // Inflated rather than constructed, purely to get surface_type="texture_view" — see the
+            // comment in that layout. A SurfaceView is composited outside the app window, so remote
+            // screenshots of a playing screen come back black.
+            val view = LayoutInflater.from(ctx)
+                .inflate(R.layout.zone_player_view, null) as PlayerView
+            view.apply {
                 useController = false
                 // Transparent background: zones overlap by design (a ticker over video is the most
                 // common signage layout) and an opaque surface would black out whatever is beneath.
