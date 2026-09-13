@@ -37,7 +37,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     val frame: StateFlow<PlaybackEngine.Frame?> = _frame.asStateFlow()
 
     val plan: StateFlow<PlaybackPlan?> = graph.content.plan
-    val downloading: StateFlow<ContentRepository.DownloadProgress?> = graph.content.downloading
+    val downloadState: StateFlow<ContentRepository.DownloadState> = graph.content.downloadState
 
     private val _blanked = MutableStateFlow(false)
     val blanked: StateFlow<Boolean> = _blanked.asStateFlow()

@@ -1,44 +1,20 @@
 package com.example.digi.device
 
-import android.content.Context
-import android.content.Intent
-import com.example.digi.core.AppLog
-
-/**
- * The admin component that device-owner provisioning binds to.
+/*
+ * REMOVED — delete this file.
  *
- * It holds no policy of its own — every restriction is applied imperatively from
- * [DeviceController]. It exists because `DevicePolicyManager` requires a registered admin component
- * as the caller identity for `reboot()`, `setLockTaskPackages()` and the user restrictions, and
- * because without it `dpm set-device-owner` has nothing to point at.
+ *     git rm app/src/main/java/com/example/digi/device/DeviceAdminReceiver.kt
+ *     git rm app/src/main/res/xml/device_admin.xml
  *
- * Provisioning, for reference, is done once per box straight after a factory reset and before any
- * account is added:
+ * This app no longer registers a device-admin component. It existed to give lock task mode
+ * (app pinning), settings blocking and a framework reboot path — and honouring the CMS's
+ * `kioskMode` setting, which defaults to on, made every unprovisioned box raise Android's
+ * "App is pinned" confirmation dialog on a public screen with nobody there to dismiss it.
  *
- *     adb shell dpm set-device-owner com.example.digi/.device.DeviceAdminReceiver
+ * Locking a device down is a deployment decision (MDM, or device-owner provisioning at install
+ * time), not something a player app should do to itself. REBOOT_DEVICE now uses `su` on the rooted
+ * boxes and reports an honest failure elsewhere.
  *
- * Boxes that skip this step still run the player; the privileged commands degrade as documented in
- * [DeviceController].
+ * The file is left in place only because the tooling writing this change cannot delete files; it is
+ * referenced by nothing and is inert.
  */
-class DeviceAdminReceiver : android.app.admin.DeviceAdminReceiver() {
-
-    override fun onEnabled(context: Context, intent: Intent) {
-        AppLog.i(TAG, "Device admin enabled — privileged commands are available")
-    }
-
-    override fun onDisabled(context: Context, intent: Intent) {
-        AppLog.w(TAG, "Device admin disabled — reboot, kiosk and settings lock will now degrade")
-    }
-
-    override fun onLockTaskModeEntering(context: Context, intent: Intent, pkg: String) {
-        AppLog.i(TAG, "Kiosk (lock task) entered")
-    }
-
-    override fun onLockTaskModeExiting(context: Context, intent: Intent) {
-        AppLog.i(TAG, "Kiosk (lock task) exited")
-    }
-
-    private companion object {
-        const val TAG = "DeviceAdmin"
-    }
-}

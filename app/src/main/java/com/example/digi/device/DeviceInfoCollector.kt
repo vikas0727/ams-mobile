@@ -105,7 +105,6 @@ class DeviceInfoCollector(
         put("isLeanback", yesNo(hasFeature(PackageManager.FEATURE_LEANBACK)))
         put("isTelevision", yesNo(hasFeature("android.hardware.type.television")))
         put("canWriteSettings", yesNo(canWriteSettings()))
-        put("isDeviceOwner", yesNo(DeviceController.isDeviceOwner(context)))
         put("timezone", java.util.TimeZone.getDefault().id)
         put("locale", java.util.Locale.getDefault().toString())
         put("hdmiInputCount", hdmiInputCount())

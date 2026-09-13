@@ -5,24 +5,36 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.digi.R
+import com.example.digi.data.repo.ContentRepository.DownloadState
 import com.example.digi.player.PlaybackEngine
+
+private val Muted = Color(0xFF9AA4B2)
+private val Dim = Color(0xFF5C6675)
+private val Accent = Color(0xFF2F6BFF)
+private val Track = Color(0xFF1C2230)
+private val Bad = Color(0xFFFF6B6B)
 
 /**
  * The wall.
@@ -35,6 +47,15 @@ import com.example.digi.player.PlaybackEngine
  * Zones are drawn in `zIndex` order and overlap freely: a ticker sitting on top of video is the
  * single most common signage layout there is, which is why the backend treats overlap as a warning
  * rather than a rejection.
+ *
+ * Three non-playing states sit in front of it, and which one shows is chosen carefully — on a
+ * screen in a public place the difference between "nothing is assigned", "content is on its way"
+ * and "something went wrong" is the whole message:
+ *
+ *  - **nothing playing, nothing downloading** → "No Content Assigned", with what to do next.
+ *  - **nothing playing, downloading** → full progress panel.
+ *  - **already playing, downloading** → a small corner chip. A content change must not black out a
+ *    live screen, so the old loop keeps running and the new one swaps in when it is complete.
  */
 @Composable
 fun PlayerScreen(
@@ -43,7 +64,7 @@ fun PlayerScreen(
 ) {
     val frame by viewModel.frame.collectAsStateWithLifecycle()
     val plan by viewModel.plan.collectAsStateWithLifecycle()
-    val download by viewModel.downloading.collectAsStateWithLifecycle()
+    val download by viewModel.downloadState.collectAsStateWithLifecycle()
     val blanked by viewModel.blanked.collectAsStateWithLifecycle()
 
     Box(
@@ -61,14 +82,10 @@ fun PlayerScreen(
         val current = frame
         if (current != null) {
             LayoutCanvas(current)
+            // Playing, but a newer playlist is still coming down. Small and out of the way.
+            (download as? DownloadState.Downloading)?.let { DownloadChip(it) }
         } else {
-            IdleScreen(
-                downloadingLabel = download?.let {
-                    "${it.fileName} (${it.index}/${it.total}) ${it.percent}%"
-                },
-                downloadFraction = download?.let { it.percent / 100f },
-                hasPlan = plan != null,
-            )
+            StatusScreen(download = download, hasPlan = plan != null)
         }
     }
 }
@@ -101,55 +118,145 @@ private fun LayoutCanvas(frame: PlaybackEngine.Frame) {
 }
 
 /**
- * Shown when there is nothing to play.
+ * Shown when there is nothing on the wall yet.
  *
  * Deliberately restrained. `hasContent:false` is a documented, normal state — an idle screen with
- * nothing scheduled — so this must not look like an error. What it does do is make a downloading
- * screen visibly different from an idle one, because "the wall is blank" and "the wall is blank and
- * pulling 400MB over a station uplink" call for completely different responses from whoever is
- * standing in front of it.
+ * nothing scheduled — so the no-content case must not look like an error, while the download and
+ * failure cases must be distinguishable from it at a glance from across a room.
  */
 @Composable
-private fun IdleScreen(
-    downloadingLabel: String?,
-    downloadFraction: Float?,
-    hasPlan: Boolean,
-) {
+private fun StatusScreen(download: DownloadState, hasPlan: Boolean) {
     Box(
         modifier = Modifier.fillMaxSize().background(Color.Black),
         contentAlignment = Alignment.Center,
     ) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
             modifier = Modifier.padding(48.dp),
         ) {
-            Text(
-                text = if (downloadingLabel != null) {
-                    androidx.compose.ui.res.stringResource(R.string.player_downloading)
-                } else {
-                    androidx.compose.ui.res.stringResource(R.string.player_no_content)
-                },
-                color = Color(0xFF9AA4B2),
-                fontSize = 28.sp,
-                fontWeight = FontWeight.Medium,
-            )
+            when (download) {
+                is DownloadState.Downloading -> {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    ) {
+                        CircularProgressIndicator(
+                            color = Accent,
+                            strokeWidth = 3.dp,
+                            modifier = Modifier.size(28.dp),
+                        )
+                        Text(
+                            text = stringResource(R.string.player_downloading),
+                            color = Color.White,
+                            fontSize = 28.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                    }
 
-            if (downloadingLabel != null) {
-                Text(downloadingLabel, color = Color(0xFF5C6675), fontSize = 16.sp)
-                LinearProgressIndicator(
-                    progress = { downloadFraction ?: 0f },
-                    modifier = Modifier.fillMaxWidth(0.5f),
-                    color = Color(0xFF2F6BFF),
-                    trackColor = Color(0xFF1C2230),
-                )
-            } else if (hasPlan) {
-                Text(
-                    androidx.compose.ui.res.stringResource(R.string.player_no_content_hint),
-                    color = Color(0xFF5C6675),
-                    fontSize = 16.sp,
-                )
+                    Text(
+                        text = stringResource(
+                            R.string.player_downloading_count,
+                            download.index,
+                            download.total,
+                        ),
+                        color = Muted,
+                        fontSize = 18.sp,
+                    )
+
+                    // Per-file percentage under the file count: on a station uplink a single 40MB
+                    // video can take minutes, and a bar that only moves once per file looks stuck.
+                    LinearProgressIndicator(
+                        progress = { download.percent / 100f },
+                        modifier = Modifier.width(520.dp),
+                        color = Accent,
+                        trackColor = Track,
+                    )
+
+                    Text(
+                        text = "${download.fileName} · ${download.percent}%",
+                        color = Dim,
+                        fontSize = 15.sp,
+                    )
+
+                    Text(
+                        text = stringResource(R.string.player_downloading_hint),
+                        color = Dim,
+                        fontSize = 15.sp,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
+
+                is DownloadState.Failed -> {
+                    Text(
+                        text = stringResource(R.string.player_download_failed),
+                        color = Bad,
+                        fontSize = 26.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Text(
+                        text = stringResource(
+                            R.string.player_download_failed_detail,
+                            download.failed,
+                            download.total,
+                        ),
+                        color = Muted,
+                        fontSize = 16.sp,
+                    )
+                }
+
+                DownloadState.Idle -> {
+                    Text(
+                        text = stringResource(R.string.player_no_content),
+                        color = Muted,
+                        fontSize = 30.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    if (hasPlan) {
+                        Text(
+                            text = stringResource(R.string.player_no_content_hint),
+                            color = Dim,
+                            fontSize = 16.sp,
+                        )
+                    }
+                }
             }
+        }
+    }
+}
+
+/**
+ * The playing-while-downloading indicator.
+ *
+ * Bottom-left, small, semi-transparent: it has to be visible to someone looking for it and ignorable
+ * to everyone else, because whatever is behind it is live content in a public space.
+ */
+@Composable
+private fun DownloadChip(state: DownloadState.Downloading) {
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomStart) {
+        Column(
+            modifier = Modifier
+                .padding(20.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color(0xCC0B1220))
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                text = stringResource(
+                    R.string.player_downloading_count,
+                    state.index,
+                    state.total,
+                ),
+                color = Muted,
+                fontSize = 13.sp,
+            )
+            LinearProgressIndicator(
+                progress = { state.percent / 100f },
+                modifier = Modifier.width(200.dp),
+                color = Accent,
+                trackColor = Track,
+            )
         }
     }
 }

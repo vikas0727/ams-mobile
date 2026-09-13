@@ -75,13 +75,6 @@ class PlayerService : Service() {
         if (loopJob == null) {
             loopJob = scope.launch { runLoop() }
             scope.launch { watchNetwork() }
-        } else {
-            scope.launch {
-                if (graph.store.paired.value) {
-                    startUp()
-                    heartbeatCycle()
-                }
-            }
         }
         // STICKY so that a system kill under memory pressure brings the loop back by itself. There
         // is nobody standing at the box to restart it.
@@ -106,14 +99,12 @@ class PlayerService : Service() {
 
         var sinceHeartbeat = Long.MAX_VALUE   // force a beat on the first pass
         while (scope.isActive) {
-            val intervalMs = graph.heartbeat.intervalSeconds() * 1000L
+            val intervalMs = beatIntervalMs()
 
             if (sinceHeartbeat >= intervalMs) {
                 sinceHeartbeat = 0
-                if (graph.store.paired.value) {
-                    runCatching { heartbeatCycle() }
-                        .onFailure { AppLog.e(TAG, "Heartbeat cycle failed", it) }
-                }
+                runCatching { heartbeatCycle() }
+                    .onFailure { AppLog.e(TAG, "Heartbeat cycle failed", it) }
             }
 
             runCatching { tick() }.onFailure { AppLog.e(TAG, "Tick failed", it) }
@@ -121,6 +112,23 @@ class PlayerService : Service() {
             delay(TICK_MS)
             sinceHeartbeat += TICK_MS
         }
+    }
+
+    /**
+     * How long to wait before the next heartbeat.
+     *
+     * Normally whatever the server asked for — 60s, being SCREEN_OFFLINE_AFTER_SECONDS / 3. But a
+     * screen with nothing to play beats faster, because that is the commissioning case: an engineer
+     * has just paired a box and is standing in front of it waiting for the operator to assign a
+     * playlist. Waiting a full minute to notice makes a working system feel broken, and the cost is
+     * three extra requests a minute from screens that are, by definition, doing nothing else.
+     *
+     * It reverts to the server's interval the moment content arrives.
+     */
+    private fun beatIntervalMs(): Long {
+        val server = graph.heartbeat.intervalSeconds() * 1000L
+        val idle = graph.content.plan.value?.hasContent != true
+        return if (idle) minOf(server, IDLE_BEAT_MS) else server
     }
 
     /**
@@ -133,7 +141,7 @@ class PlayerService : Service() {
     private suspend fun startUp() {
         graph.content.restoreCachedPlan()
 
-        if (!graph.store.paired.value || !graph.pairing.verify()) {
+        if (!graph.pairing.verify()) {
             AppLog.w(TAG, "Not paired (or the token was rejected) — the UI will ask for a code")
             return
         }
@@ -148,10 +156,6 @@ class PlayerService : Service() {
     }
 
     private suspend fun heartbeatCycle() {
-        if (!graph.store.paired.value) {
-            AppLog.d(TAG, "Skipping heartbeat cycle: device is not paired")
-            return
-        }
         val beat = graph.heartbeat.beat(PlayerHost.current()?.currentlyPlaying())
         state.value = state.value.copy(
             online = graph.heartbeat.online.value,
@@ -279,16 +283,10 @@ class PlayerService : Service() {
             }
         }
 
-        val kiosk = settings.kioskMode == AmsConstants.ACTIVE
-        if (kiosk != state.value.kioskEnabled) {
-            state.value = state.value.copy(kioskEnabled = kiosk)
-            PlayerHost.current()?.setKiosk(kiosk)
-        }
-
-        if (settings.lockDeviceSettings == AmsConstants.ACTIVE && !state.value.settingsLocked) {
-            state.value = state.value.copy(settingsLocked = true)
-            DeviceController.setSettingsBlocked(this, true)
-        }
+        // settings.kioskMode and settings.lockDeviceSettings are deliberately IGNORED. Both are
+        // device-lockdown switches, kioskMode defaults to on in the CMS, and honouring it was what
+        // raised Android's "App is pinned" dialog on every unprovisioned box. Locking a device down
+        // belongs to the deployment (MDM or device-owner provisioning), not to the player.
     }
 
     /**
@@ -395,8 +393,6 @@ class PlayerService : Service() {
         val displayOn: Boolean = true,
         val appliedVolume: Int? = null,
         val appliedBrightness: Int? = null,
-        val kioskEnabled: Boolean = false,
-        val settingsLocked: Boolean = false,
         val inForeground: Boolean = true,
     )
 
@@ -405,6 +401,9 @@ class PlayerService : Service() {
         private const val CHANNEL_ID = "digi_playback"
         private const val NOTIFICATION_ID = 1001
         private const val TICK_MS = 10_000L
+
+        /** Heartbeat cadence while a screen has no content — see [beatIntervalMs]. */
+        private const val IDLE_BEAT_MS = 15_000L
 
         private val state = MutableStateFlow(ServiceState())
         val serviceState: StateFlow<ServiceState> = state.asStateFlow()

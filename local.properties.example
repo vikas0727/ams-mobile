@@ -1,0 +1,21 @@
+# Copy to local.properties and fill in. local.properties is git-ignored; this template is not,
+# so never put the real AES secret in this file.
+#
+# sdk.dir is written automatically by Android Studio the first time it opens the project.
+
+# ── Backend ───────────────────────────────────────────────────────────────────
+# Trailing slash and the /api/v1 prefix are both required.
+#   emulator, backend on this PC  ->  http://10.0.2.2:5000/api/v1/
+#   real TV box                   ->  http://<this PC's LAN IP>:5000/api/v1/
+#   .env.prod                     ->  port 5001, not 5000
+digi.apiBaseUrl=http://10.0.2.2:5000/api/v1/
+
+# ── AES ───────────────────────────────────────────────────────────────────────
+# From D:\Projects\AMS\.env.dev lines 25-26, WITHOUT the surrounding quotes —
+# dotenv strips them, so the bare string is what the server actually holds.
+# The secret is SHA-256'd by both sides; the IV is hex-decoded, 32 hex characters.
+digi.aesSecretKey=PUT_THE_BACKEND_AES_SECRET_KEY_HERE
+digi.aesIv=PUT_THE_BACKEND_AES_IV_HERE
+
+# Set false only if /api/v1/player is ever added to server.js's cryptoBypassRoutes.
+digi.aesEnabled=true

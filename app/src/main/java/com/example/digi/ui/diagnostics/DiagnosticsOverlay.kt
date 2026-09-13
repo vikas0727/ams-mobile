@@ -33,6 +33,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.digi.core.AppLog
 import com.example.digi.core.DigiApp
 import com.example.digi.core.ServerClock
+import com.example.digi.data.repo.ContentRepository
 import com.example.digi.service.PlayerService
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
@@ -68,6 +69,7 @@ fun DiagnosticsOverlay(
     val graph = remember { DigiApp.graph(context) }
     val service by PlayerService.serviceState.collectAsStateWithLifecycle()
     val plan by graph.content.plan.collectAsStateWithLifecycle()
+    val download by graph.content.downloadState.collectAsStateWithLifecycle()
     val logs by AppLog.entries.collectAsStateWithLifecycle()
 
     // Queue depths and cache size need a database round trip, so they refresh on their own slow
@@ -136,6 +138,16 @@ fun DiagnosticsOverlay(
                     "Missing assets",
                     (plan?.missingAssets ?: 0).toString(),
                     if ((plan?.missingAssets ?: 0) > 0) Bad else Good,
+                )
+                Field(
+                    "Downloads",
+                    when (val d = download) {
+                        is ContentRepository.DownloadState.Downloading ->
+                            "${d.index}/${d.total} — ${d.fileName} ${d.percent}%"
+                        is ContentRepository.DownloadState.Failed -> "${d.failed} of ${d.total} FAILED"
+                        ContentRepository.DownloadState.Idle -> "idle"
+                    },
+                    if (download is ContentRepository.DownloadState.Failed) Bad else Color.White,
                 )
 
                 Section("Storage & queues")

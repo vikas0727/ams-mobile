@@ -12,16 +12,14 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.REORDER_TASKS" />
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"
-        tools:ignore="ProtectedPermissions" />
     <!--
-        Brightness is a Settings.System write, which is a special access the user grants once from
-        the system settings screen (or which is granted implicitly when this app is provisioned as
-        device owner). SET_BRIGHTNESS commands degrade to an in-app window dim when it is absent.
+        Brightness is a Settings.System write, a special access granted once from the system
+        settings screen. SET_BRIGHTNESS degrades to an in-app window dim when it is absent.
     -->
     <uses-permission android:name="android.permission.WRITE_SETTINGS"
         tools:ignore="ProtectedPermissions" />
-    <!-- Only effective on a rooted/system-signed build; REBOOT_DEVICE falls back to a self-restart. -->
+    <!-- Only effective on a rooted or system-signed build; elsewhere REBOOT_DEVICE reports an
+         honest failure rather than pretending. -->
     <uses-permission android:name="android.permission.REBOOT"
         tools:ignore="ProtectedPermissions" />
 
@@ -67,16 +65,17 @@
             </intent-filter>
 
             <!--
-                Default Launcher: with the HOME category declared, an operator turning on
-                "defaultLauncher" in the CMS can make this app the home screen so the box boots
-                straight into content and the Home key cannot escape it. Android still asks the
-                user to pick a default the first time unless the app is device owner.
+                No HOME intent-filter. Making the player the home launcher is a lockdown decision
+                that belongs to the deployment, and declaring it here makes every press of Home on a
+                developer's box raise a "choose a launcher" chooser. If a production install wants
+                it, add back:
+
+                    <intent-filter>
+                        <action android:name="android.intent.action.MAIN" />
+                        <category android:name="android.intent.category.HOME" />
+                        <category android:name="android.intent.category.DEFAULT" />
+                    </intent-filter>
             -->
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.HOME" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
         </activity>
 
         <service
@@ -101,22 +100,6 @@
             android:enabled="true"
             android:exported="false" />
 
-        <!--
-            Bound by `dpm set-device-owner com.example.digi/.device.DeviceAdminReceiver` once per
-            box, straight after a factory reset. Without it the player still runs; REBOOT_DEVICE,
-            KIOSK_ON and the settings lock degrade instead (see DeviceController).
-        -->
-        <receiver
-            android:name=".device.DeviceAdminReceiver"
-            android:exported="true"
-            android:permission="android.permission.BIND_DEVICE_ADMIN">
-            <meta-data
-                android:name="android.app.device_admin"
-                android:resource="@xml/device_admin" />
-            <intent-filter>
-                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
-            </intent-filter>
-        </receiver>
     </application>
 
 </manifest>

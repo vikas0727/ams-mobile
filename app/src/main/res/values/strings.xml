@@ -1,20 +1,35 @@
 <resources>
     <string name="app_name">AMS Player</string>
 
+    <!-- Pairing -->
     <string name="pair_title">Pair this screen</string>
     <string name="pair_subtitle">Enter the 6-character pairing code from the AMS portal</string>
     <string name="pair_action">Pair</string>
     <string name="pair_working">Pairing…</string>
     <string name="pair_device_id">Device ID</string>
 
-    <string name="player_no_content">Waiting for content</string>
-    <string name="player_no_content_hint">This screen is paired but nothing is scheduled right now.</string>
-    <string name="player_downloading">Downloading content…</string>
+    <!--
+        Idle. This is a documented, normal state — the server answers hasContent:false for a screen
+        with nothing scheduled — so the wording says what to do next rather than reading as a fault.
+    -->
+    <string name="player_no_content">No Content Assigned</string>
+    <string name="player_no_content_hint">This screen is paired and online. Assign a playlist to it in the AMS portal and it will start playing automatically.</string>
 
+    <!-- Downloading -->
+    <string name="player_downloading">Downloading playlist…</string>
+    <string name="player_downloading_count">Downloading %1$d of %2$d files</string>
+    <string name="player_downloading_hint">Playback starts as soon as the download finishes.</string>
+
+    <!-- Download failure -->
+    <string name="player_download_failed">Some files could not be downloaded</string>
+    <string name="player_download_failed_detail">%1$d of %2$d files failed. Playing what did arrive; the rest will be retried on the next sync.</string>
+
+    <!-- Foreground service notification -->
     <string name="notif_channel_name">Playback</string>
     <string name="notif_channel_desc">Keeps the player running and reporting to the AMS portal</string>
     <string name="notif_title">AMS Player</string>
 
+    <!-- Diagnostics overlay -->
     <string name="diag_title">Diagnostics</string>
     <string name="diag_close">Close</string>
 </resources>

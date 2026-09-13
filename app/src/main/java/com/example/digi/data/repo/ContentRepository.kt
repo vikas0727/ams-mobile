@@ -14,6 +14,7 @@ import com.example.digi.media.MediaCache
 import com.example.digi.player.PlaybackPlan
 import com.example.digi.player.PlanBuilder
 import com.example.digi.player.assetRequests
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -48,15 +49,32 @@ class ContentRepository(
     private val _plan = MutableStateFlow<PlaybackPlan?>(null)
     val plan: StateFlow<PlaybackPlan?> = _plan.asStateFlow()
 
-    private val _downloading = MutableStateFlow<DownloadProgress?>(null)
-    val downloading: StateFlow<DownloadProgress?> = _downloading.asStateFlow()
+    private val _downloadState = MutableStateFlow<DownloadState>(DownloadState.Idle)
+    val downloadState: StateFlow<DownloadState> = _downloadState.asStateFlow()
 
-    data class DownloadProgress(
-        val fileName: String,
-        val index: Int,
-        val total: Int,
-        val percent: Int,
-    )
+    /**
+     * What the downloader is doing, for the screen to render.
+     *
+     * [Failed] is deliberately a terminal state that the player keeps showing rather than an
+     * exception that vanishes into a log: on a wall-mounted box nobody reads logcat, and "three
+     * files are missing" is the single most useful thing to put in front of whoever is standing
+     * there wondering why the loop is short.
+     */
+    sealed interface DownloadState {
+        data object Idle : DownloadState
+
+        data class Downloading(
+            val fileName: String,
+            val index: Int,
+            val total: Int,
+            val percent: Int,
+        ) : DownloadState
+
+        data class Failed(
+            val failed: Int,
+            val total: Int,
+        ) : DownloadState
+    }
 
     /**
      * Put whatever was cached last time on screen, without waiting for the network.
@@ -118,13 +136,17 @@ class ContentRepository(
             return@withLock true
         }
 
-        // Step 2: play what is already here.
-        _plan.value = planBuilder.build(body)
-
-        // Step 3: fetch the rest.
+        // Step 2: download everything BEFORE putting the new playlist on screen.
+        //
+        // Publishing a half-downloaded plan would start the loop with files missing and grow it as
+        // they landed, which reads on a public screen as a fault rather than as progress. The one
+        // thing that must not stop is a playlist that is ALREADY playing: a screen showing last
+        // week's loop keeps showing it through the whole download and swaps only when the new one
+        // is complete, so a content change is invisible rather than a gap.
         downloadAssets(body)
 
-        // Steps 4 and 5.
+        // Step 3: publish. Even if some files permanently failed, what did arrive is published —
+        // a shorter loop beats a blank screen, and the failure is surfaced separately.
         _plan.value = planBuilder.build(body)
         body.contentVersion?.let { store.contentVersion = it }
         AppLog.i(
@@ -139,29 +161,67 @@ class ContentRepository(
         true
     }
 
+    /**
+     * Fetch every asset the manifest needs, one at a time, retrying each before moving on.
+     *
+     * Sequential rather than parallel on purpose. These boxes sit on a shared station uplink and
+     * four concurrent 30MB downloads do not finish four times faster — they finish at the same
+     * total time with every individual file's progress bar crawling, which makes a download that is
+     * working look like one that has hung.
+     *
+     * A file that exhausts its retries does not abort the pass. The remaining files still download,
+     * the playlist still plays with what arrived, and the failure count is surfaced to the screen
+     * and retried on the next sync — which is usually enough, because the common cause is an S3
+     * signature that expired mid-download and the next manifest re-signs it.
+     */
     private suspend fun downloadAssets(body: SyncResponse) {
         val wanted = body.assetRequests()
-        if (wanted.isEmpty()) return
+        if (wanted.isEmpty()) {
+            _downloadState.value = DownloadState.Idle
+            return
+        }
 
         // Mark everything referenced as still wanted before downloading, so an eviction pass that
         // overlaps this one cannot delete a file this manifest is about to need.
         cache.touch(wanted.map { it.cacheKey })
 
-        var index = 0
-        for (asset in wanted) {
-            index++
-            if (cache.isReady(asset.cacheKey)) continue
+        val missing = wanted.filterNot { cache.isReady(it.cacheKey) }
+        if (missing.isEmpty()) {
+            AppLog.i(TAG, "All ${wanted.size} asset(s) already cached — nothing to download")
+            _downloadState.value = DownloadState.Idle
+            return
+        }
 
-            _downloading.value = DownloadProgress(asset.fileName, index, wanted.size, 0)
+        AppLog.i(TAG, "Downloading ${missing.size} of ${wanted.size} asset(s)")
+        var failed = 0
+
+        missing.forEachIndexed { position, asset ->
+            val index = position + 1
+            _downloadState.value = DownloadState.Downloading(asset.fileName, index, missing.size, 0)
             events.playlistEvent(
                 status = AmsConstants.LogStatus.DOWNLOAD_STARTED,
                 fileName = asset.fileName,
                 mediaId = asset.mediaId,
             )
 
-            val ok = cache.ensure(asset) { percent ->
-                _downloading.value = DownloadProgress(asset.fileName, index, wanted.size, percent)
+            var ok = false
+            for (attempt in 1..DOWNLOAD_ATTEMPTS) {
+                ok = cache.ensure(asset) { percent ->
+                    _downloadState.value =
+                        DownloadState.Downloading(asset.fileName, index, missing.size, percent)
+                }
+                if (ok) break
+                if (attempt < DOWNLOAD_ATTEMPTS) {
+                    // Linear backoff. A station uplink that dropped mid-file is usually back within
+                    // seconds; anything longer and the next sync will pick this up anyway, so there
+                    // is no value in waiting minutes here and holding the whole pass up.
+                    val waitMs = attempt * RETRY_BACKOFF_MS
+                    AppLog.w(TAG, "Retrying ${asset.fileName} in ${waitMs}ms (attempt $attempt of $DOWNLOAD_ATTEMPTS)")
+                    delay(waitMs)
+                }
             }
+
+            if (!ok) failed++
 
             events.playlistEvent(
                 status = if (ok) AmsConstants.LogStatus.DOWNLOAD_COMPLETED
@@ -169,12 +229,15 @@ class ContentRepository(
                 fileName = asset.fileName,
                 mediaId = asset.mediaId,
             )
-
-            // Republish as each file lands so a long download shows the loop growing rather than
-            // holding a partial plan until the very end.
-            if (ok) _plan.value = planBuilder.build(body)
         }
-        _downloading.value = null
+
+        _downloadState.value = if (failed > 0) {
+            AppLog.e(TAG, "$failed of ${missing.size} download(s) failed — playing what arrived")
+            DownloadState.Failed(failed, missing.size)
+        } else {
+            AppLog.i(TAG, "All ${missing.size} asset(s) downloaded")
+            DownloadState.Idle
+        }
     }
 
     /**
@@ -236,5 +299,7 @@ class ContentRepository(
 
     private companion object {
         const val TAG = "Content"
+        const val DOWNLOAD_ATTEMPTS = 3
+        const val RETRY_BACKOFF_MS = 3_000L
     }
 }

@@ -1,15 +1,14 @@
 package com.example.digi.core
 
-import com.example.digi.device.DeviceController
 import java.io.File
 
 /**
  * The things only a live Activity can do, exposed to the background service.
  *
- * Kiosk (lock task), window brightness and screen capture all need a window and an Activity
- * context; the service that executes commands has neither. Rather than leak an Activity reference
- * into the service, [com.example.digi.MainActivity] registers itself here while it is resumed
- * and clears itself when it is not.
+ * Window brightness and screen capture both need a window and an Activity context; the service
+ * that executes commands has neither. Rather than leak an Activity reference into the service,
+ * [com.example.digi.MainActivity] registers itself here while it is resumed and clears itself when
+ * it is not.
  *
  * Every method is therefore callable while nothing is registered, and the command executor treats
  * that as a real, reportable outcome rather than a crash: "the player UI was not in the foreground"
@@ -20,8 +19,6 @@ interface PlayerHost {
 
     /** @return the captured PNG, or null if the window could not be read. */
     suspend fun captureScreenshot(): File?
-
-    fun setKiosk(enabled: Boolean): DeviceController.Outcome
 
     /** The fallback when WRITE_SETTINGS is not granted: dim this app's own window. */
     fun applyWindowBrightness(level: Int)

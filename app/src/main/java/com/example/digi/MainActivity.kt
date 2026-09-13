@@ -5,7 +5,6 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
-import android.os.Looper
 import android.view.KeyEvent
 import android.view.PixelCopy
 import android.view.View
@@ -40,17 +39,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicReference
 
 /**
  * The only Activity: pairing screen, or the wall.
  *
- * It also acts as the app's [PlayerHost], because kiosk mode, window brightness and screen capture
- * all need a window and an Activity, and the service that executes remote commands has neither.
- * Registration is tied to resume/pause so a command that arrives while the player is not in the
- * foreground reports that honestly instead of silently doing nothing.
+ * It also acts as the app's [PlayerHost], because window brightness and screen capture both need a
+ * window and an Activity, and the service that executes remote commands has neither. Registration is
+ * tied to resume/pause so a command that arrives while the player is not in the foreground reports
+ * that honestly instead of silently doing nothing.
  */
 class MainActivity : ComponentActivity(), PlayerHost {
 
@@ -149,9 +145,10 @@ class MainActivity : ComponentActivity(), PlayerHost {
     /**
      * Back is swallowed while paired.
      *
-     * On a kiosk there is nowhere to go back to, and a stray press on a remote that left the player
-     * would put the launcher on a public screen. The diagnostics overlay is reached by the INFO or
-     * MENU key instead, which no content playback path uses.
+     * There is nowhere to go back to, and a stray press on a remote that left the player would put
+     * the launcher on a public screen. This is a single swallowed key, not app pinning — the device
+     * is never locked and anyone can leave with Home. The diagnostics overlay is on INFO or MENU,
+     * which no content playback path uses.
      */
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         return when (keyCode) {
@@ -239,17 +236,10 @@ class MainActivity : ComponentActivity(), PlayerHost {
     }
 
     /**
-     * Lock task and window attributes are main-thread-only, and every caller here is the command
-     * executor running on the service's IO loop. Hopping threads and waiting is the honest option:
-     * the executor needs the real outcome to put in its acknowledgement, and posting-and-guessing
-     * would report a success the device may not have achieved.
+     * Window attributes are main-thread-only and the caller here is the command executor running on
+     * the service's IO loop, so this hops threads rather than touching the window from wherever it
+     * happens to be called.
      */
-    override fun setKiosk(enabled: Boolean): DeviceController.Outcome = onMainThread(
-        fallback = DeviceController.Outcome.failed("Timed out waiting for the UI thread"),
-    ) {
-        if (enabled) DeviceController.startKiosk(this) else DeviceController.stopKiosk(this)
-    }
-
     override fun applyWindowBrightness(level: Int) {
         runOnUiThread { DeviceController.applyWindowBrightness(this, level) }
     }
@@ -259,22 +249,6 @@ class MainActivity : ComponentActivity(), PlayerHost {
     }
 
     override fun currentlyPlaying(): String? = playerViewModel?.currentlyPlaying()
-
-    /** Run [block] on the main thread and wait for its result, or give up after [timeoutMs]. */
-    private fun <T> onMainThread(fallback: T, timeoutMs: Long = 5_000, block: () -> T): T {
-        if (Looper.myLooper() == Looper.getMainLooper()) return block()
-
-        val latch = CountDownLatch(1)
-        val holder = AtomicReference(fallback)
-        runOnUiThread {
-            try {
-                holder.set(block())
-            } finally {
-                latch.countDown()
-            }
-        }
-        return if (latch.await(timeoutMs, TimeUnit.MILLISECONDS)) holder.get() else fallback
-    }
 
     private companion object {
         const val TAG = "MainActivity"

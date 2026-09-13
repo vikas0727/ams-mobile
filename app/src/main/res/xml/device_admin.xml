@@ -1,12 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Policies claimed by DeviceAdminReceiver. Kept to the minimum the remote commands actually use:
-    a signage player has no business asking for storage encryption or password policy, and an
-    over-broad admin is the kind of thing that gets an APK refused by a site's IT department.
+    REMOVED — delete this file:  git rm app/src/main/res/xml/device_admin.xml
+
+    The device-admin component this described is gone; see DeviceAdminReceiver.kt for why. Nothing
+    references this file. It is left in place only because the tooling writing this change cannot
+    delete files.
 -->
 <device-admin xmlns:android="http://schemas.android.com/apk/res/android">
-    <uses-policies>
-        <force-lock />
-        <reset-password />
-    </uses-policies>
+    <uses-policies />
 </device-admin>

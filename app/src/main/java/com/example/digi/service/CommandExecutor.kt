@@ -30,10 +30,10 @@ import java.io.File
  * Executes every command in `SCREEN_COMMAND_ARRAY` and reports honestly what happened.
  *
  * The guiding rule is that an ack must describe the world, not the intent. Android does not let an
- * ordinary app reboot a box, replace the launcher or set screen brightness, so several of these
- * degrade — and when they do, the ack says so in `errorMessage` or in the result payload rather
- * than reporting a clean success. An operator who sees "Volume set to 47%" and finds the panel
- * silent has no way to work out why; one who sees "WRITE_SETTINGS not granted" does.
+ * ordinary app reboot a box or set screen brightness, so several of these degrade — and when they
+ * do, the ack says so in `errorMessage` or in the result payload rather than reporting a clean
+ * success. An operator who sees "Volume set to 47%" and finds the panel silent has no way to work
+ * out why; one who sees "WRITE_SETTINGS not granted" does.
  *
  * Commands that do not exist in this build are acked as failures with a clear reason rather than
  * ignored, so they leave the CMS queue instead of being re-delivered forever.
@@ -134,13 +134,16 @@ class CommandExecutor(
                 else DeviceController.Outcome.failed("Re-sync failed — the server was unreachable")
             }
 
-            AmsConstants.Command.KIOSK_ON ->
-                host?.setKiosk(true)
-                    ?: DeviceController.Outcome.failed("Player UI is not in the foreground")
-
-            AmsConstants.Command.KIOSK_OFF ->
-                host?.setKiosk(false)
-                    ?: DeviceController.Outcome.failed("Player UI is not in the foreground")
+            // Not implemented, on purpose. Android's only in-app lockdown is lock task mode, and
+            // on a box that is not a provisioned device owner it raises the "App is pinned"
+            // confirmation dialog — which then sits on a public screen waiting for a person who is
+            // not there. Acked as a failure with the reason rather than silently ignored, so the
+            // command leaves the CMS queue and the operator can see why.
+            AmsConstants.Command.KIOSK_ON, AmsConstants.Command.KIOSK_OFF ->
+                DeviceController.Outcome.failed(
+                    "Kiosk lockdown is not implemented in this build — provision the box as device " +
+                        "owner or use an MDM if the screen needs locking down"
+                )
 
             AmsConstants.Command.TIME_SYNC -> {
                 // The offset is already maintained from every response's serverTime; this command

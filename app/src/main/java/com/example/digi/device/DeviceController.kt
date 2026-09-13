@@ -2,7 +2,6 @@ package com.example.digi.device
 
 import android.app.Activity
 import android.app.ActivityManager
-import android.app.admin.DevicePolicyManager
 import android.content.Context
 import android.content.Intent
 import android.media.AudioManager
@@ -17,16 +16,18 @@ import kotlin.system.exitProcess
 /**
  * Everything the CMS's remote commands need to reach outside the app.
  *
- * The honest constraint here is that a normal Android app cannot do most of what a signage operator
- * expects. Rebooting a box, blocking the settings screen, replacing the launcher and setting screen
- * brightness are all privileged, and on an unprovisioned device they are simply unavailable. There
- * are three levels of capability and each method below picks the best one present:
+ * The honest constraint here is that a normal Android app cannot do everything a signage operator
+ * expects. Rebooting a box and setting screen brightness are both privileged, and on an
+ * unprovisioned device they are unavailable. Each method picks the best path present: root (the
+ * norm on the Droidlogic units in this fleet, where `su -c reboot` works), then the closest in-app
+ * approximation, then an honest failure.
  *
- *  1. **device owner** — provisioned via `dpm set-device-owner` or an NFC/QR enrolment at factory
- *     reset. Gives lock task mode, system-update control and settings restrictions.
- *  2. **root** — the norm on the Droidlogic units in this fleet. `su -c reboot` works.
- *  3. **plain app** — falls back to the closest in-app approximation (a self-restart instead of a
- *     device reboot, a black overlay instead of a real display power-off).
+ * **There is deliberately no app pinning, lock task, launcher replacement or settings blocking
+ * here.** An earlier build called `startLockTask()` whenever the CMS's `kioskMode` setting was on —
+ * which it is by default — and on a box that is not a provisioned device owner that raises
+ * Android's "App is pinned" confirmation dialog, sitting on the screen waiting for a person who is
+ * not there. Locking a device down is a deployment decision (MDM, or device-owner provisioning at
+ * install time), not something a player app should do to itself.
  *
  * Every method reports what it actually managed to do rather than what it was asked to do, so that
  * an ack sent back to the CMS is truthful. A SET_BRIGHTNESS that silently did nothing but acked
@@ -50,11 +51,6 @@ object DeviceController {
     }
 
     /* ── capability probes ─────────────────────────────────────────────────── */
-
-    fun isDeviceOwner(context: Context): Boolean = runCatching {
-        val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
-        dpm.isDeviceOwnerApp(context.packageName)
-    }.getOrDefault(false)
 
     fun canWriteSystemSettings(context: Context): Boolean = runCatching {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Settings.System.canWrite(context) else true
@@ -132,23 +128,16 @@ object DeviceController {
     /**
      * REBOOT_DEVICE.
      *
-     * Tries the framework API (device owner, API 24+), then `su -c reboot` for the rooted boxes
-     * that make up most of this fleet, and finally reports failure — it does NOT quietly restart
-     * the app instead, because "the screen rebooted" and "the app restarted" mean different things
-     * to whoever is reading the command history.
+     * `su -c reboot` on the rooted boxes that make up most of this fleet, and an honest failure
+     * everywhere else — it does NOT quietly restart the app instead, because "the screen rebooted"
+     * and "the app restarted" mean different things to whoever is reading the command history.
+     *
+     * The framework path (`DevicePolicyManager.reboot`) is deliberately not used: it needs
+     * device-owner provisioning, and this app no longer registers a device-admin component at all.
      */
     fun rebootDevice(context: Context): Outcome {
-        if (isDeviceOwner(context) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            runCatching {
-                val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
-                dpm.reboot(adminComponent(context))
-                return Outcome.ok("Reboot issued through device owner")
-            }.onFailure { AppLog.w(TAG, "Device-owner reboot refused", it) }
-        }
         if (runSuCommand("reboot")) return Outcome.ok("Reboot issued through su")
-        return Outcome.failed(
-            "Reboot unavailable: this build is neither device owner nor rooted"
-        )
+        return Outcome.failed("Reboot unavailable: this box is not rooted")
     }
 
     /**
@@ -204,31 +193,6 @@ object DeviceController {
         )
     }
 
-    /* ── kiosk ─────────────────────────────────────────────────────────────── */
-
-    /**
-     * KIOSK_ON. Lock task mode genuinely pins the app — Home and Recents stop working — but only
-     * when this app is device owner or has been whitelisted by one. Everywhere else Android shows
-     * the "screen pinning" confirmation, which nobody is present to accept, so the call degrades to
-     * the app's own foreground-watchdog behaviour instead.
-     */
-    fun startKiosk(activity: Activity): Outcome = runCatching {
-        if (isDeviceOwner(activity)) {
-            val dpm = activity.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
-            dpm.setLockTaskPackages(adminComponent(activity), arrayOf(activity.packageName))
-            activity.startLockTask()
-            Outcome.ok("Kiosk enabled (lock task, device owner)")
-        } else {
-            activity.startLockTask()
-            Outcome.partial("Kiosk requested without device owner — Android will ask to confirm pinning")
-        }
-    }.getOrElse { Outcome.failed("Could not enable kiosk: ${it.message}") }
-
-    fun stopKiosk(activity: Activity): Outcome = runCatching {
-        activity.stopLockTask()
-        Outcome.ok("Kiosk disabled")
-    }.getOrElse { Outcome.failed("Could not disable kiosk: ${it.message}") }
-
     /** Pulls the player back to the front — the watchdog behind `keepOnTop`. */
     fun bringToFront(context: Context) {
         runCatching {
@@ -246,25 +210,7 @@ object DeviceController {
         }
     }
 
-    /** lockDeviceSettings — only a device owner can actually block the settings app. */
-    fun setSettingsBlocked(context: Context, blocked: Boolean): Outcome {
-        if (!isDeviceOwner(context)) {
-            return Outcome.partial("Cannot block device settings without device-owner provisioning")
-        }
-        return runCatching {
-            val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
-            val admin = adminComponent(context)
-            if (blocked) dpm.addUserRestriction(admin, android.os.UserManager.DISALLOW_FACTORY_RESET)
-            else dpm.clearUserRestriction(admin, android.os.UserManager.DISALLOW_FACTORY_RESET)
-            dpm.setApplicationHidden(admin, "com.android.settings", blocked)
-            Outcome.ok(if (blocked) "Device settings blocked" else "Device settings unblocked")
-        }.getOrElse { Outcome.failed("Could not change settings restriction: ${it.message}") }
-    }
-
     /* ── internals ─────────────────────────────────────────────────────────── */
-
-    private fun adminComponent(context: Context) =
-        android.content.ComponentName(context, DeviceAdminReceiver::class.java)
 
     private fun runSuCommand(command: String): Boolean = runCatching {
         val process = Runtime.getRuntime().exec("su")
