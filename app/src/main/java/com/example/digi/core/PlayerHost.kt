@@ -17,8 +17,19 @@ import java.io.File
  */
 interface PlayerHost {
 
-    /** @return the captured PNG, or null if the window could not be read. */
-    suspend fun captureScreenshot(): File?
+    /**
+     * Capture the window.
+     *
+     * @param maxWidthPx  scale the result down to at most this wide, keeping aspect. Null keeps
+     *                    full resolution. The Live Data View preview is a ~380px box, so sending
+     *                    1920px frames every few seconds would be a hundredfold waste of a station
+     *                    uplink for pixels nobody sees.
+     * @param jpegQuality 1-100 to encode as JPEG; null encodes lossless PNG. Live frames are JPEG
+     *                    (~40KB) because they are transient; an operator-requested screenshot is
+     *                    PNG because it goes in the history and may be read closely.
+     * @return the captured file, or null if the window could not be read.
+     */
+    suspend fun captureScreenshot(maxWidthPx: Int? = null, jpegQuality: Int? = null): File?
 
     /** The fallback when WRITE_SETTINGS is not granted: dim this app's own window. */
     fun applyWindowBrightness(level: Int)

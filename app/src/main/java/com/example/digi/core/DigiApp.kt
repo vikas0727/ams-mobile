@@ -12,6 +12,7 @@ import com.example.digi.data.repo.CommandRepository
 import com.example.digi.data.repo.ContentRepository
 import com.example.digi.data.repo.EventReporter
 import com.example.digi.data.repo.HeartbeatRepository
+import com.example.digi.data.repo.LiveFrameReporter
 import com.example.digi.data.repo.PairingRepository
 import com.example.digi.data.repo.ProofOfPlayRecorder
 import com.example.digi.device.DeviceInfoCollector
@@ -79,6 +80,8 @@ class DigiApp : Application() {
         val content: ContentRepository by lazy { ContentRepository(api, store, mediaCache, events) }
 
         val heartbeat: HeartbeatRepository by lazy { HeartbeatRepository(api, store, telemetry) }
+
+        val liveFrames: LiveFrameReporter by lazy { LiveFrameReporter(api, store) }
 
         val commands: CommandRepository by lazy { CommandRepository(api, database.pendingCommandDao()) }
 

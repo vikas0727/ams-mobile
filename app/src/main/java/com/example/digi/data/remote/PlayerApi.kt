@@ -10,6 +10,7 @@ import com.example.digi.data.remote.dto.DownloadedFilesResponse
 import com.example.digi.data.remote.dto.Envelope
 import com.example.digi.data.remote.dto.HeartbeatRequest
 import com.example.digi.data.remote.dto.HeartbeatResponse
+import com.example.digi.data.remote.dto.LiveFrameResponse
 import com.example.digi.data.remote.dto.MeResponse
 import com.example.digi.data.remote.dto.PairRequest
 import com.example.digi.data.remote.dto.PairResponse
@@ -77,6 +78,17 @@ interface PlayerApi {
 
     @POST("player/events")
     suspend fun events(@Body body: PlayerEventsRequest): Response<Envelope<PlayerEventsResponse>>
+
+    /**
+     * A Live Data View frame — a downscaled JPEG of what is on the panel right now.
+     *
+     * Separate from [screenshot]: these overwrite one object per screen instead of accumulating a
+     * history, and the response says whether anyone is still watching. Not encrypted, for the same
+     * reason as the screenshot route.
+     */
+    @Multipart
+    @POST("player/live-frame")
+    suspend fun liveFrame(@Part file: MultipartBody.Part): Response<Envelope<LiveFrameResponse>>
 
     /**
      * multipart/form-data with a "file" part. `commandId` closes out the SCREENSHOT command that

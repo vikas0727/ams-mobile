@@ -75,6 +75,7 @@ class PlayerService : Service() {
         if (loopJob == null) {
             loopJob = scope.launch { runLoop() }
             scope.launch { watchNetwork() }
+            scope.launch { streamLiveFrames() }
         }
         // STICKY so that a system kill under memory pressure brings the loop back by itself. There
         // is nobody standing at the box to restart it.
@@ -321,6 +322,31 @@ class PlayerService : Service() {
         }
     }
 
+    /**
+     * The Live Data View stream.
+     *
+     * Its own loop rather than a step inside the tick, because it runs at a different cadence for a
+     * different reason: the tick is local housekeeping every ten seconds, while this is a network
+     * push every five — and only during the minutes an operator has the panel open. Folding it into
+     * the tick would either slow the stream to a slideshow or triple the rate of everything else.
+     *
+     * Costs nothing at all when nobody is watching: the flag is a preference read, and the loop
+     * does not touch the screen or the network until it is set.
+     *
+     * There is a floor of about one heartbeat on how quickly the stream STARTS, because that is
+     * when the player learns the toggle was flipped. Stopping is immediate — the server tells it so
+     * on the next frame.
+     */
+    private suspend fun streamLiveFrames() {
+        while (scope.isActive) {
+            if (graph.store.realtimeCaptureEnabled && !graph.store.playerToken.isNullOrBlank()) {
+                runCatching { graph.liveFrames.pushFrame() }
+                    .onFailure { AppLog.w(TAG, "Live frame push failed", it) }
+            }
+            delay(LIVE_FRAME_MS)
+        }
+    }
+
     /* ── foreground plumbing ────────────────────────────────────────────────── */
 
     private fun createChannel() {
@@ -416,6 +442,9 @@ class PlayerService : Service() {
 
         /** Heartbeat cadence while a screen has no content — see [beatIntervalMs]. */
         private const val IDLE_BEAT_MS = 15_000L
+
+        /** Live Data View frame cadence, matching the backend's LIVE_FRAME_INTERVAL_SECONDS. */
+        private const val LIVE_FRAME_MS = 5_000L
 
         private val state = MutableStateFlow(ServiceState())
         val serviceState: StateFlow<ServiceState> = state.asStateFlow()

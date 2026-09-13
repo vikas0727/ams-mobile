@@ -186,7 +186,7 @@ class MainActivity : ComponentActivity(), PlayerHost {
      * returns everything except the thing the operator wanted to see. PixelCopy reads the window's
      * actual surface and gets the frame that is on the wall.
      */
-    override suspend fun captureScreenshot(): File? = withContext(Dispatchers.Main) {
+    override suspend fun captureScreenshot(maxWidthPx: Int?, jpegQuality: Int?): File? = withContext(Dispatchers.Main) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             AppLog.w(TAG, "Screen capture needs API 26+; this box is ${Build.VERSION.SDK_INT}")
             return@withContext null
@@ -215,16 +215,28 @@ class MainActivity : ComponentActivity(), PlayerHost {
                 return@withContext null
             }
 
-            // Compression is the slow part and needs no window, so it goes back off the main
-            // thread — a 1080p PNG encode on a cheap SoC is comfortably long enough to drop frames.
+            // Scaling and compression are the slow parts and need no window, so they go back off
+            // the main thread — a 1080p encode on a cheap SoC is comfortably long enough to drop
+            // frames, and at one live frame every five seconds that would be visible on the wall.
             withContext(Dispatchers.IO) {
-                val file = File(cacheDir, "screenshot-${System.currentTimeMillis()}.png")
+                val scaled = scaleDown(bitmap, maxWidthPx)
+                val jpeg = jpegQuality != null
+                val file = File(
+                    cacheDir,
+                    "${if (jpeg) "frame" else "screenshot"}-${System.currentTimeMillis()}" +
+                        if (jpeg) ".jpg" else ".png",
+                )
                 FileOutputStream(file).use { out ->
-                    // PNG because the CMS stores and displays these as-is, and a re-encoded JPEG of
-                    // a text-heavy signage layout is harder to read than the extra megabyte is to
-                    // send.
-                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                    if (jpeg) {
+                        scaled.compress(Bitmap.CompressFormat.JPEG, jpegQuality.coerceIn(1, 100), out)
+                    } else {
+                        // PNG for an operator-requested screenshot: it goes in the history and may
+                        // be read closely, and a re-encoded JPEG of a text-heavy signage layout is
+                        // harder to read than the extra megabyte is to send.
+                        scaled.compress(Bitmap.CompressFormat.PNG, 100, out)
+                    }
                 }
+                if (scaled !== bitmap) scaled.recycle()
                 bitmap.recycle()
                 file
             }
@@ -249,6 +261,21 @@ class MainActivity : ComponentActivity(), PlayerHost {
     }
 
     override fun currentlyPlaying(): String? = playerViewModel?.currentlyPlaying()
+
+    /**
+     * Shrink to [maxWidthPx] wide, keeping aspect. Returns the original when it is already small
+     * enough or no limit was given, so the caller must compare identities before recycling.
+     */
+    private fun scaleDown(bitmap: Bitmap, maxWidthPx: Int?): Bitmap {
+        if (maxWidthPx == null || maxWidthPx <= 0 || bitmap.width <= maxWidthPx) return bitmap
+        val height = (bitmap.height.toLong() * maxWidthPx / bitmap.width).toInt().coerceAtLeast(1)
+        return runCatching {
+            Bitmap.createScaledBitmap(bitmap, maxWidthPx, height, true)
+        }.getOrElse {
+            AppLog.w(TAG, "Could not scale capture, sending full size", it)
+            bitmap
+        }
+    }
 
     private companion object {
         const val TAG = "MainActivity"
