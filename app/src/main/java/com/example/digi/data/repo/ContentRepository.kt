@@ -73,6 +73,8 @@ class ContentRepository(
         data class Failed(
             val failed: Int,
             val total: Int,
+            /** Why the last one failed, in words an operator can act on. */
+            val reason: String,
         ) : DownloadState
     }
 
@@ -194,6 +196,7 @@ class ContentRepository(
 
         AppLog.i(TAG, "Downloading ${missing.size} of ${wanted.size} asset(s)")
         var failed = 0
+        var lastReason = ""
 
         missing.forEachIndexed { position, asset ->
             val index = position + 1
@@ -204,24 +207,38 @@ class ContentRepository(
                 mediaId = asset.mediaId,
             )
 
-            var ok = false
+            var outcome: MediaCache.Outcome = MediaCache.Outcome.Ok
             for (attempt in 1..DOWNLOAD_ATTEMPTS) {
-                ok = cache.ensure(asset) { percent ->
+                outcome = cache.ensure(asset) { percent ->
                     _downloadState.value =
                         DownloadState.Downloading(asset.fileName, index, missing.size, percent)
                 }
-                if (ok) break
+                if (outcome is MediaCache.Outcome.Ok) break
+
+                val failure = outcome as MediaCache.Outcome.Failed
+                if (!failure.retryable) {
+                    AppLog.w(TAG, "Not retrying ${asset.fileName} — ${failure.reason}")
+                    break
+                }
                 if (attempt < DOWNLOAD_ATTEMPTS) {
                     // Linear backoff. A station uplink that dropped mid-file is usually back within
                     // seconds; anything longer and the next sync will pick this up anyway, so there
                     // is no value in waiting minutes here and holding the whole pass up.
                     val waitMs = attempt * RETRY_BACKOFF_MS
-                    AppLog.w(TAG, "Retrying ${asset.fileName} in ${waitMs}ms (attempt $attempt of $DOWNLOAD_ATTEMPTS)")
+                    AppLog.w(
+                        TAG,
+                        "Retrying ${asset.fileName} in ${waitMs}ms " +
+                            "(attempt $attempt of $DOWNLOAD_ATTEMPTS) — ${failure.reason}"
+                    )
                     delay(waitMs)
                 }
             }
 
-            if (!ok) failed++
+            val ok = outcome is MediaCache.Outcome.Ok
+            if (!ok) {
+                failed++
+                lastReason = (outcome as? MediaCache.Outcome.Failed)?.reason ?: "unknown"
+            }
 
             events.playlistEvent(
                 status = if (ok) AmsConstants.LogStatus.DOWNLOAD_COMPLETED
@@ -232,8 +249,8 @@ class ContentRepository(
         }
 
         _downloadState.value = if (failed > 0) {
-            AppLog.e(TAG, "$failed of ${missing.size} download(s) failed — playing what arrived")
-            DownloadState.Failed(failed, missing.size)
+            AppLog.e(TAG, "$failed of ${missing.size} download(s) failed — $lastReason")
+            DownloadState.Failed(failed, missing.size, lastReason)
         } else {
             AppLog.i(TAG, "All ${missing.size} asset(s) downloaded")
             DownloadState.Idle

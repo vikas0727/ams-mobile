@@ -12,7 +12,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import java.io.File
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.security.MessageDigest
+import javax.net.ssl.SSLException
 
 /**
  * Local media storage: download once, play from disk forever.
@@ -63,28 +67,46 @@ class MediaCache(
     }
 
     /**
+     * The outcome of one download attempt, with a reason a human can act on.
+     *
+     * A plain boolean was the original design and it was a mistake: when every attempt failed, the
+     * only trace was `AppLog.w(tag, "Download error", e)`, which puts the throwable in logcat's
+     * second argument — so the line anyone actually reads said nothing at all about what went
+     * wrong. On a box on a wall that is the difference between a five-minute diagnosis and an
+     * afternoon. The reason now travels with the result, into the log line, onto the screen and
+     * into the diagnostics overlay.
+     */
+    sealed interface Outcome {
+        data object Ok : Outcome
+
+        /** @param retryable false for a failure that will never succeed without a new manifest. */
+        data class Failed(val reason: String, val retryable: Boolean = true) : Outcome
+    }
+
+    /**
      * Download [asset] unless it is already held.
      *
      * Downloads into a `.part` file and renames on success. A half-written MP4 that a power cut
      * left behind under its final name would be indistinguishable from a complete one, and
      * ExoPlayer would fail on it on every loop until someone cleared the cache by hand.
-     *
-     * @return true when the asset is ready to play after this call.
      */
     suspend fun ensure(
         asset: Asset,
         onProgress: (Int) -> Unit = {},
-    ): Boolean = withContext(Dispatchers.IO) {
+    ): Outcome = withContext(Dispatchers.IO) {
         val key = asset.cacheKey
-        if (key.isBlank() || asset.url.isBlank()) return@withContext false
+        if (key.isBlank() || asset.url.isBlank()) {
+            return@withContext Outcome.Failed("Manifest gave no cacheKey or URL for this item", retryable = false)
+        }
 
         if (isReady(key)) {
             dao.touch(listOf(key), ServerClock.now())
-            return@withContext true
+            return@withContext Outcome.Ok
         }
 
         synchronized(inFlight) {
-            if (!inFlight.add(key)) return@withContext false   // another coroutine has it
+            // Another coroutine already has it. Not a failure, and not retryable by this caller.
+            if (!inFlight.add(key)) return@withContext Outcome.Failed("Already downloading", retryable = false)
         }
 
         try {
@@ -98,16 +120,20 @@ class MediaCache(
             val okRequest = Request.Builder().url(asset.url).build()
             ApiClient.download.newCall(okRequest).execute().use { response ->
                 if (!response.isSuccessful) {
-                    // A 403 here is nearly always an expired signature rather than a missing file:
-                    // the next sync re-signs and this asset is retried then, so it is a warning
-                    // rather than a permanent failure.
-                    AppLog.w(TAG, "Download failed ${response.code} for ${asset.fileName}")
+                    val reason = when (response.code) {
+                        // The signature is time-limited (X-Amz-Expires=3600). The next sync
+                        // re-signs, so this is worth retrying then but not right now.
+                        403 -> "S3 refused the signed URL (403) — the signature has probably expired; the next sync re-signs it"
+                        404 -> "Not in the bucket (404) — the object is missing server-side"
+                        else -> "S3 returned HTTP ${response.code}"
+                    }
+                    AppLog.w(TAG, "Download failed for ${asset.fileName} — $reason")
                     markFailed(asset, target)
-                    return@withContext false
+                    return@withContext Outcome.Failed(reason, retryable = response.code != 404)
                 }
                 val body = response.body ?: run {
                     markFailed(asset, target)
-                    return@withContext false
+                    return@withContext Outcome.Failed("S3 returned an empty body")
                 }
 
                 val total = body.contentLength().takeIf { it > 0 } ?: asset.expectedBytes ?: -1L
@@ -136,10 +162,11 @@ class MediaCache(
 
                 if (target.exists()) target.delete()
                 if (!part.renameTo(target)) {
-                    AppLog.e(TAG, "Could not finalise ${asset.fileName}")
                     part.delete()
+                    val reason = "Could not finalise the file on disk — is storage full?"
+                    AppLog.e(TAG, "Download failed for ${asset.fileName} — $reason")
                     markFailed(asset, target)
-                    return@withContext false
+                    return@withContext Outcome.Failed(reason)
                 }
 
                 dao.upsert(
@@ -148,16 +175,51 @@ class MediaCache(
                 )
                 AppLog.i(TAG, "Cached ${asset.fileName} (${target.length() / 1024}KB)")
                 onProgress(100)
-                true
+                Outcome.Ok
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
-            AppLog.w(TAG, "Download error for ${asset.fileName}", e)
+            val reason = describe(e, asset.url)
+            // The reason is in the MESSAGE, not only in the throwable argument — this line is what
+            // ends up in the ring buffer, the diagnostics overlay and whatever someone pastes into
+            // a bug report.
+            AppLog.w(TAG, "Download failed for ${asset.fileName} — $reason", e)
             markFailed(asset, File(root, fileNameFor(key, asset.fileName)))
-            false
+            Outcome.Failed(reason)
         } finally {
             synchronized(inFlight) { inFlight.remove(key) }
+        }
+    }
+
+    /**
+     * Turn a transport exception into something an operator can act on.
+     *
+     * The one that matters most on this fleet is [UnknownHostException]. The AMS API is reached by
+     * IP address, so a device whose DNS is broken talks to the CMS perfectly and then fails every
+     * single media download — heartbeats green in the portal, nothing ever on the wall. Without
+     * naming DNS explicitly that looks like a bug in the player rather than in the network.
+     */
+    private fun describe(e: Throwable, url: String): String {
+        val host = runCatching { java.net.URI(url).host }.getOrNull() ?: "the media host"
+        return when (e) {
+            is UnknownHostException ->
+                "Cannot resolve $host — the device has a network route but no working DNS. " +
+                    "The AMS API is reached by IP so it still works; media downloads need DNS."
+
+            is SSLException ->
+                "TLS handshake with $host failed (${e.message ?: "no detail"}) — check the device clock and any proxy"
+
+            is SocketTimeoutException ->
+                "Timed out talking to $host — the link is up but too slow or being dropped"
+
+            is ConnectException ->
+                "Could not connect to $host (${e.message ?: "refused"}) — outbound HTTPS may be blocked"
+
+            is java.io.IOException ->
+                "Network error reading from $host: ${e.javaClass.simpleName}: ${e.message ?: "no detail"}"
+
+            else -> "${e.javaClass.simpleName}: ${e.message ?: "no detail"}"
         }
     }
 

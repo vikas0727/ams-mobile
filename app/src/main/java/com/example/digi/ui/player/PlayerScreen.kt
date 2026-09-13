@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
@@ -23,6 +24,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -202,6 +204,16 @@ private fun StatusScreen(download: DownloadState, hasPlan: Boolean) {
                         ),
                         color = Muted,
                         fontSize = 16.sp,
+                    )
+                    // The actual reason, on the wall. Whoever is standing in front of a screen that
+                    // will not play is the person who can fix the network it is on, and making them
+                    // go and find adb first wastes the trip.
+                    Text(
+                        text = download.reason,
+                        color = Dim,
+                        fontSize = 15.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.widthIn(max = 760.dp).padding(top = 4.dp),
                     )
                 }
 

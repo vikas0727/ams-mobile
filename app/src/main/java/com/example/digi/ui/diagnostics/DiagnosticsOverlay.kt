@@ -144,7 +144,8 @@ fun DiagnosticsOverlay(
                     when (val d = download) {
                         is ContentRepository.DownloadState.Downloading ->
                             "${d.index}/${d.total} — ${d.fileName} ${d.percent}%"
-                        is ContentRepository.DownloadState.Failed -> "${d.failed} of ${d.total} FAILED"
+                        is ContentRepository.DownloadState.Failed ->
+                            "${d.failed} of ${d.total} FAILED — ${d.reason}"
                         ContentRepository.DownloadState.Idle -> "idle"
                     },
                     if (download is ContentRepository.DownloadState.Failed) Bad else Color.White,
