@@ -31,6 +31,26 @@ interface PlayerHost {
      */
     suspend fun captureScreenshot(maxWidthPx: Int? = null, jpegQuality: Int? = null): File?
 
+    /**
+     * Capture one Live Data View frame, already downscaled and JPEG-encoded, in memory.
+     *
+     * Deliberately NOT [captureScreenshot] with a width argument, though that is what it used to be.
+     * That path allocates a bitmap the size of the panel — 10MB on a 2340x1080 box — copies the
+     * whole window into it, allocates a second bitmap to scale it down, and writes the result to
+     * disk for the uploader to read back and delete. Once every few minutes for an
+     * operator-requested screenshot that is fine. Every five seconds, forever, it is not: the
+     * readback stalls the compositor, the two large allocations churn the heap, and the video on the
+     * wall visibly stutters the moment somebody opens Live Data View.
+     *
+     * This path asks the system to scale *during* the copy into one small reused buffer, and hands
+     * back the bytes. Nothing large is allocated and nothing touches the disk.
+     *
+     * @param targetWidthPx the width to scale to, keeping aspect
+     * @param jpegQuality   1-100
+     * @return the JPEG bytes, or null if the window could not be read
+     */
+    suspend fun captureFrame(targetWidthPx: Int, jpegQuality: Int): ByteArray?
+
     /** The fallback when WRITE_SETTINGS is not granted: dim this app's own window. */
     fun applyWindowBrightness(level: Int)
 

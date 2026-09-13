@@ -8,7 +8,7 @@ import com.example.digi.data.remote.PlayerApi
 import com.example.digi.data.remote.apiCall
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
-import okhttp3.RequestBody.Companion.asRequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 
 /**
  * The Live Data View stream: a picture of the panel every few seconds, but only while an operator
@@ -24,9 +24,11 @@ import okhttp3.RequestBody.Companion.asRequestBody
  *
  *  - **Gated.** Nothing is captured or sent unless `realtimeCaptureEnabled` is on, which the
  *    heartbeat keeps in step with the CMS toggle. An unwatched screen costs exactly nothing.
- *  - **Downscaled.** The preview panel is about 380px wide; frames are captured at 640px and
- *    JPEG-encoded, so each is roughly 40KB rather than the two megabytes a full-resolution PNG
- *    of a 1080p wall would be.
+ *  - **Downscaled during the copy, not after it.** The preview panel is about 380px wide, so the
+ *    system scales the window straight into one reused 640px buffer: ~40KB on the wire, and no
+ *    panel-sized bitmap allocated per frame. That second half matters as much as the first — a
+ *    10MB allocation and a full-surface readback every five seconds is what used to make the video
+ *    on the wall stutter the moment somebody opened Live Data View. See PlayerHost.captureFrame.
  *  - **Self-stopping.** The server re-checks the flag and answers `captureEnabled:false` when
  *    nobody is watching, which stops this without waiting for the next heartbeat. A player that
  *    missed the stop command cannot stream at a screen nobody has open.
@@ -53,48 +55,45 @@ class LiveFrameReporter(
             return true
         }
 
-        val file = host.captureScreenshot(maxWidthPx = FRAME_WIDTH_PX, jpegQuality = FRAME_QUALITY)
-        if (file == null) {
+        val jpeg = host.captureFrame(targetWidthPx = FRAME_WIDTH_PX, jpegQuality = FRAME_QUALITY)
+        if (jpeg == null || jpeg.isEmpty()) {
             AppLog.d(TAG, "Frame capture returned nothing")
             return true
         }
 
-        return try {
-            val part = MultipartBody.Part.createFormData(
-                "file",
-                file.name,
-                file.asRequestBody("image/jpeg".toMediaType()),
-            )
+        val part = MultipartBody.Part.createFormData(
+            "file",
+            // The server overwrites one fixed object per screen, so the name is cosmetic. It still
+            // carries the timestamp, because a multipart part with no recognisable name is harder
+            // to identify in a packet capture than it is worth saving four bytes on.
+            "live-${System.currentTimeMillis()}.jpg",
+            jpeg.toRequestBody("image/jpeg".toMediaType(), 0, jpeg.size),
+        )
 
-            when (val result = apiCall { api.liveFrame(part) }) {
-                is ApiResult.Success -> {
-                    if (!result.data.captureEnabled) {
-                        // Authoritative: the operator closed the panel, or the toggle was never
-                        // really on. Stop now rather than at the next heartbeat.
-                        AppLog.i(TAG, "Server says nobody is watching — stopping the live frame stream")
-                        store.realtimeCaptureEnabled = false
-                        false
-                    } else {
-                        true
-                    }
-                }
-
-                is ApiResult.Unauthorized -> {
-                    AppLog.w(TAG, "Live frame rejected: ${result.message}")
+        return when (val result = apiCall { api.liveFrame(part) }) {
+            is ApiResult.Success -> {
+                if (!result.data.captureEnabled) {
+                    // Authoritative: the operator closed the panel, or the toggle was never really
+                    // on. Stop now rather than at the next heartbeat.
+                    AppLog.i(TAG, "Server says nobody is watching — stopping the live frame stream")
+                    store.realtimeCaptureEnabled = false
                     false
-                }
-
-                else -> {
-                    // A dropped frame is not worth a retry — another one is due in seconds, and
-                    // queueing stale pictures of a screen would be worse than skipping them.
-                    AppLog.d(TAG, "Live frame upload failed, skipping: $result")
+                } else {
                     true
                 }
             }
-        } finally {
-            // Never keep them. One JPEG every five seconds accumulates into hundreds of megabytes
-            // of cache over a long diagnostic session.
-            runCatching { file.delete() }
+
+            is ApiResult.Unauthorized -> {
+                AppLog.w(TAG, "Live frame rejected: ${result.message}")
+                false
+            }
+
+            else -> {
+                // A dropped frame is not worth a retry — another one is due in seconds, and
+                // queueing stale pictures of a screen would be worse than skipping them.
+                AppLog.d(TAG, "Live frame upload failed, skipping: $result")
+                true
+            }
         }
     }
 
