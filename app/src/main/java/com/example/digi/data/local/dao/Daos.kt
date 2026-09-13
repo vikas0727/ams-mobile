@@ -8,6 +8,7 @@ import androidx.room.Upsert
 import com.example.digi.data.local.entity.CachedAssetEntity
 import com.example.digi.data.local.entity.EventLogEntity
 import com.example.digi.data.local.entity.PendingCommandEntity
+import com.example.digi.data.local.entity.PendingHeartbeatEntity
 import com.example.digi.data.local.entity.ProofOfPlayEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -125,5 +126,36 @@ interface PendingCommandDao {
     suspend fun clear()
 
     @Query("SELECT COUNT(*) FROM pending_command")
+    suspend fun count(): Int
+}
+
+@Dao
+interface PendingHeartbeatDao {
+
+    /**
+     * IGNORE, not REPLACE: the primary key is the minute itself, so a second beat inside the same
+     * minute is the same fact arriving twice and the stored row is already correct. REPLACE would
+     * reset `attempts` on every idle-cadence beat and hide a queue that is failing to drain.
+     */
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insert(beat: PendingHeartbeatEntity): Long
+
+    @Query("SELECT * FROM pending_heartbeat ORDER BY minuteEpoch ASC LIMIT :limit")
+    suspend fun oldest(limit: Int): List<PendingHeartbeatEntity>
+
+    @Query("DELETE FROM pending_heartbeat WHERE minuteEpoch IN (:minutes)")
+    suspend fun delete(minutes: List<Long>)
+
+    @Query("UPDATE pending_heartbeat SET attempts = attempts + 1 WHERE minuteEpoch IN (:minutes)")
+    suspend fun markAttempted(minutes: List<Long>)
+
+    /** Beats older than the server will accept. Dropped locally rather than posted and rejected. */
+    @Query("DELETE FROM pending_heartbeat WHERE minuteEpoch < :before")
+    suspend fun purgeBefore(before: Long)
+
+    @Query("DELETE FROM pending_heartbeat")
+    suspend fun clear()
+
+    @Query("SELECT COUNT(*) FROM pending_heartbeat")
     suspend fun count(): Int
 }

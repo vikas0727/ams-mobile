@@ -45,6 +45,7 @@ private val Panel = Color(0xFF121A28)
 private val Accent = Color(0xFF2F6BFF)
 private val Good = Color(0xFF3DD68C)
 private val Bad = Color(0xFFFF6B6B)
+private val Warn = Color(0xFFFFC14D)
 private val Label = Color(0xFF6B7688)
 
 /**
@@ -79,6 +80,7 @@ fun DiagnosticsOverlay(
             value = Stats(
                 proofOfPlayQueued = runCatching { graph.proofOfPlay.queuedCount() }.getOrDefault(-1),
                 eventsQueued = runCatching { graph.events.queuedCount() }.getOrDefault(-1),
+                heartbeatsBuffered = runCatching { graph.heartbeat.bufferedCount() }.getOrDefault(-1),
                 cachedBytes = runCatching { graph.mediaCache.occupiedBytes() }.getOrDefault(0),
                 cachedFiles = runCatching { graph.mediaCache.inventory().size }.getOrDefault(0),
                 freeBytes = runCatching { graph.mediaCache.freeSpaceBytes() }.getOrDefault(0),
@@ -118,6 +120,14 @@ fun DiagnosticsOverlay(
                     // clearly playing".
                     if (graph.heartbeat.consideredOfflineByServer()) "would show OFFLINE" else "shows online",
                     if (graph.heartbeat.consideredOfflineByServer()) Bad else Good,
+                )
+                Field(
+                    // Beats that happened while the link was down and are waiting to be replayed.
+                    // Non-zero on a screen that is currently online means the backfill is failing,
+                    // which is otherwise invisible — the screen looks perfectly healthy.
+                    "Beats buffered",
+                    if (stats.heartbeatsBuffered > 0) "${stats.heartbeatsBuffered} to replay" else "none",
+                    if (stats.heartbeatsBuffered > 0) Warn else Good,
                 )
                 Field("Clock offset", "${ServerClock.currentOffsetMs} ms")
                 Field("Last sync", formatTime(graph.store.lastSyncedAt))
@@ -244,6 +254,7 @@ private fun Field(label: String, value: String, valueColor: Color = Color.White)
 private data class Stats(
     val proofOfPlayQueued: Int = 0,
     val eventsQueued: Int = 0,
+    val heartbeatsBuffered: Int = 0,
     val cachedBytes: Long = 0,
     val cachedFiles: Int = 0,
     val freeBytes: Long = 0,

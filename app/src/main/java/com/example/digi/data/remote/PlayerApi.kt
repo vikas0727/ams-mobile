@@ -8,6 +8,8 @@ import com.example.digi.data.remote.dto.DeviceInfoResponse
 import com.example.digi.data.remote.dto.DownloadedFilesRequest
 import com.example.digi.data.remote.dto.DownloadedFilesResponse
 import com.example.digi.data.remote.dto.Envelope
+import com.example.digi.data.remote.dto.HeartbeatBackfillRequest
+import com.example.digi.data.remote.dto.HeartbeatBackfillResponse
 import com.example.digi.data.remote.dto.HeartbeatRequest
 import com.example.digi.data.remote.dto.HeartbeatResponse
 import com.example.digi.data.remote.dto.LiveFrameResponse
@@ -31,7 +33,7 @@ import retrofit2.http.Part
 import retrofit2.http.Path
 
 /**
- * Every route in AMS's Player module — all eleven, nothing else.
+ * Every route in AMS's Player module, and nothing else.
  *
  * `Response<Envelope<T>>` rather than a bare `T` because the HTTP status is the only trustworthy
  * success signal here: the backend's `sendSuccess` helper writes the human message into `errorMsg`
@@ -55,6 +57,18 @@ interface PlayerApi {
 
     @POST("player/heartbeat")
     suspend fun heartbeat(@Body body: HeartbeatRequest): Response<Envelope<HeartbeatResponse>>
+
+    /**
+     * Replay the beats that happened while this device was cut off.
+     *
+     * Records history only: the server deliberately does not move `lastHeartbeatAt` or `isOnline`
+     * from this route, because a replay of three-day-old beats must not mark a screen online that
+     * has since been unplugged again. Only a live [heartbeat] says a screen is up now.
+     */
+    @POST("player/heartbeat-backfill")
+    suspend fun heartbeatBackfill(
+        @Body body: HeartbeatBackfillRequest,
+    ): Response<Envelope<HeartbeatBackfillResponse>>
 
     @GET("player/commands")
     suspend fun commands(): Response<Envelope<CommandsResponse>>

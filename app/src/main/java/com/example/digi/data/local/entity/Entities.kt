@@ -99,6 +99,31 @@ data class CachedAssetEntity(
  * otherwise strand the command in "delivered" forever with no retry. Persisting the batch the
  * moment it arrives is what closes that window: a restart replays whatever is still here.
  */
+/**
+ * A heartbeat that happened but could not be delivered.
+ *
+ * The screen does not stop working when the uplink does — that is the entire point of downloading
+ * content to local storage — so it keeps producing a beat a minute that has nowhere to go. Without
+ * this table those minutes are simply lost, and the CMS uptime grid paints the outage as a block of
+ * red that says the *screen* was down when in fact it was playing the whole time.
+ *
+ * Keyed by `minuteEpoch` — the epoch-minute the beat belongs to — rather than by an autoincrementing
+ * id, so the primary key does the deduplication. The player beats every 15 seconds while idle, and
+ * the server counts distinct minutes anyway; storing four rows for one minute would just be four
+ * copies of the same fact. `IGNORE` on insert keeps the first one.
+ *
+ * `playing` records whether content was actually on the wall at the time. A beat buffered while the
+ * screen sat on a download panel or a "no content" card is still evidence the box was alive, but it
+ * is not evidence the site was getting what it paid for, and the two are worth telling apart.
+ */
+@Entity(tableName = "pending_heartbeat")
+data class PendingHeartbeatEntity(
+    /** Epoch millis floored to the minute — the primary key, so a minute can only be stored once. */
+    @PrimaryKey val minuteEpoch: Long,
+    val playing: Int = 0,
+    val attempts: Int = 0,
+)
+
 @Entity(tableName = "pending_command")
 data class PendingCommandEntity(
     @PrimaryKey val id: String,

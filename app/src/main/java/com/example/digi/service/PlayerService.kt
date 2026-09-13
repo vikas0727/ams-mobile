@@ -157,7 +157,12 @@ class PlayerService : Service() {
     }
 
     private suspend fun heartbeatCycle() {
-        val beat = graph.heartbeat.beat(PlayerHost.current()?.currentlyPlaying())
+        // Whether content is genuinely on the panel, not merely whether a plan exists. A beat
+        // buffered during an outage records this, so a later report can tell "the screen was up and
+        // playing" from "the screen was up, staring at a download panel".
+        val playing = state.value.displayOn && graph.content.plan.value?.hasContent == true
+
+        val beat = graph.heartbeat.beat(PlayerHost.current()?.currentlyPlaying(), playing)
         state.value = state.value.copy(
             online = graph.heartbeat.online.value,
             lastBeatAt = graph.store.lastHeartbeatOkAt,
@@ -168,6 +173,14 @@ class PlayerService : Service() {
             updateNotification()
             return
         }
+
+        // This beat proves the link is usable, so anything buffered during the outage can go now.
+        // Done here as well as on the network-state callback because the two failure modes are
+        // different: the callback fires when the interface comes back, this fires when the SERVER
+        // comes back, and a screen behind a link that never dropped while the CMS was restarting
+        // would otherwise sit on its buffer indefinitely.
+        runCatching { graph.heartbeat.flushBuffered() }
+            .onFailure { AppLog.w(TAG, "Heartbeat backfill failed", it) }
 
         applySettings(beat.settings)
 
@@ -313,6 +326,10 @@ class PlayerService : Service() {
             if (online) {
                 AppLog.i(TAG, "Network restored — flushing queues")
                 graph.events.appEvent(AmsConstants.LogAction.NETWORK_RESTORED)
+                // Before the other queues: this is the one that decides what the CMS uptime grid
+                // says about the outage that just ended, and it is the cheapest of the three.
+                runCatching { graph.heartbeat.flushBuffered() }
+                    .onFailure { AppLog.w(TAG, "Heartbeat backfill failed", it) }
                 flushQueues()
                 graph.content.reportInventory()
             } else {
