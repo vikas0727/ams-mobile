@@ -67,6 +67,19 @@ interface PlayerHost {
     fun playbackState(): PlaybackState?
 
     /**
+     * Restart the playback component — decoders and surfaces — WITHOUT restarting the process.
+     *
+     * This is what the CMS's "Restart Player App" button should do. Killing and relaunching the app
+     * takes a signage box through a cold start in front of whoever is standing at it, and throws
+     * away the socket, the local queues and the in-flight heartbeat along the way. A stuck clip, a
+     * black zone or a wedged decoder needs the players rebuilt, which is all this does.
+     *
+     * Returns false when there is no foreground UI to restart, so the caller can fall back to a real
+     * process restart rather than acknowledging a command that did nothing.
+     */
+    fun restartPlayback(): Boolean
+
+    /**
      * @param mediaId      the media the main zone is showing
      * @param positionMs   how far into that slide the device actually is
      * @param slideIndex   position in the zone's slide list, so the CMS can follow a loop that has

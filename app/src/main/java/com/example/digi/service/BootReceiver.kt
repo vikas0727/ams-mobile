@@ -57,18 +57,47 @@ class BootReceiver : BroadcastReceiver() {
             false
         }
 
-        if (!activityStarted) {
-            runCatching { PlayerService.start(context) }
-                .onFailure { AppLog.e(TAG, "Could not start the player service from boot either", it) }
-        }
+        /*
+         * Start the service EITHER WAY, not only as a fallback.
+         *
+         * This used to start the service only when the Activity failed, which reads sensibly and is
+         * wrong on the case that matters: on Android 10+ a background activity start is silently
+         * refused on many ROMs — `startActivity` returns without throwing, so `activityStarted` is
+         * true and nothing is on screen and nothing is running. The device comes back from a reboot
+         * dark, with no heartbeat, and the CMS shows it offline until somebody visits the site.
+         *
+         * The service is the component that actually keeps the screen alive, and starting it twice
+         * is a no-op — its loop guards on `loopJob`. So it is started unconditionally and the
+         * Activity is treated as the optimisation it is.
+         */
+        runCatching { PlayerService.start(context) }
+            .onFailure { AppLog.e(TAG, "Could not start the player service from boot", it) }
+
+        AppLog.i(
+            TAG,
+            if (activityStarted) "Player Activity and service started from $action"
+            else "Service started from $action; the Activity will come up when the launcher allows it"
+        )
     }
 
     private companion object {
         const val TAG = "BootReceiver"
+        /*
+         * Every spelling of "the box just came up" that is actually in the wild.
+         *
+         * QUICKBOOT_POWERON is the important addition: the Amlogic and Rockchip ROMs most of this
+         * fleet runs on never fully power down, so a power cycle brings them out of fast-boot
+         * WITHOUT broadcasting BOOT_COMPLETED. A player listening only for that stays dark after
+         * exactly the event it most needs to recover from — and after a REBOOT_DEVICE command,
+         * which is what makes this part of the same requirement.
+         */
         val HANDLED = setOf(
             Intent.ACTION_BOOT_COMPLETED,
             "android.intent.action.LOCKED_BOOT_COMPLETED",
             Intent.ACTION_MY_PACKAGE_REPLACED,
+            "android.intent.action.QUICKBOOT_POWERON",
+            "com.htc.intent.action.QUICKBOOT_POWERON",
+            "android.intent.action.REBOOT",
         )
     }
 }

@@ -88,6 +88,9 @@ fun PlayerScreen(
      * on; the screen simply has to redraw when the value changes, which is what collecting it does.
      */
     val settings by DigiApp.graph(context).store.settings.collectAsStateWithLifecycle()
+    // Threaded down to every zone so a playback restart disposes the ExoPlayers and their surfaces
+    // and builds fresh ones. See PlayerViewModel.restartPlayback.
+    val playbackGeneration by viewModel.playbackGeneration.collectAsStateWithLifecycle()
     val dotIndicators = settings?.dotIndicators == AmsConstants.ACTIVE
 
     Box(
@@ -104,7 +107,7 @@ fun PlayerScreen(
 
         val current = frame
         if (current != null) {
-            LayoutCanvas(current)
+            LayoutCanvas(current, playbackGeneration)
             // The CMS's `dotIndicators` setting, honoured. Read at draw time rather than pushed,
             // because it is a rendering preference with nothing to "apply" to hardware.
             if (dotIndicators) SlideDots(current, Modifier.align(Alignment.BottomCenter))
@@ -117,7 +120,7 @@ fun PlayerScreen(
 }
 
 @Composable
-private fun LayoutCanvas(frame: PlaybackEngine.Frame) {
+private fun LayoutCanvas(frame: PlaybackEngine.Frame, playbackGeneration: Int) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val panelWidth = maxWidth
         val panelHeight = maxHeight
@@ -130,7 +133,9 @@ private fun LayoutCanvas(frame: PlaybackEngine.Frame) {
                 // in the list. Without it a layout change that reorders or drops a zone slides the
                 // remembered state — including the zone's ExoPlayer and its live surface — onto a
                 // different zone, which is a black flash at best and the wrong clip at worst.
-                key(zone.key) {
+                // The generation joins the key so "Restart Player App" tears every zone down and
+                // rebuilds it — releasing each decoder — without restarting the process.
+                key(zone.key, playbackGeneration) {
                     ZoneContent(
                         zoneFrame = zoneFrame,
                         muted = zone.muted,

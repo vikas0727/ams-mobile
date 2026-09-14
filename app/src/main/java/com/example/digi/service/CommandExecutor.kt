@@ -111,8 +111,30 @@ class CommandExecutor(
             }
 
             AmsConstants.Command.RESTART_APP -> {
-                pendingRestart = true
-                DeviceController.Outcome.ok("App will restart once this acknowledgement is sent")
+                /*
+                 * Restart the PLAYER, not the process.
+                 *
+                 * This used to kill and relaunch the whole app, which is a far bigger hammer than
+                 * the button implies and worse in every way that matters on a wall: ten to fifteen
+                 * seconds of black through a cold start, the launcher visible on boxes slow to come
+                 * back, and the socket, the unsent queues and the in-flight heartbeat all thrown
+                 * away. What an operator pressing this actually wants is a wedged decoder or a black
+                 * zone cleared, and that needs the players rebuilt — nothing more.
+                 *
+                 * Falls back to the process restart only when there is no foreground UI to recycle,
+                 * because then there is genuinely nothing else to do and acknowledging success would
+                 * be a lie.
+                 */
+                if (host?.restartPlayback() == true) {
+                    events.appEvent(AmsConstants.LogAction.APP_STARTED, status = "playback-restarted")
+                    DeviceController.Outcome.ok("Playback restarted")
+                } else {
+                    AppLog.w(TAG, "No foreground player to restart — falling back to an app restart")
+                    pendingRestart = true
+                    DeviceController.Outcome.partial(
+                        "No player in the foreground; restarting the app instead"
+                    )
+                }
             }
 
             AmsConstants.Command.REBOOT_DEVICE -> {

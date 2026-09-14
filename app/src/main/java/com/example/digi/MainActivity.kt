@@ -371,6 +371,18 @@ class MainActivity : ComponentActivity(), PlayerHost {
 
     override fun playbackState(): PlayerHost.PlaybackState? = playerViewModel?.playbackState()
 
+    /**
+     * Hops to the main thread because the caller is the service's IO loop and this ends in Compose
+     * state that must not be written from elsewhere. Reports whether there was actually a view model
+     * to restart — before pairing, or with the Activity gone, there is nothing to recycle and the
+     * caller needs to know rather than assume.
+     */
+    override fun restartPlayback(): Boolean {
+        val vm = playerViewModel ?: return false
+        runOnUiThread { vm.restartPlayback() }
+        return true
+    }
+
     private companion object {
         const val TAG = "MainActivity"
     }

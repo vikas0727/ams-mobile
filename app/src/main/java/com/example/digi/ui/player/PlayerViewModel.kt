@@ -43,6 +43,44 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _blanked = MutableStateFlow(false)
     val blanked: StateFlow<Boolean> = _blanked.asStateFlow()
 
+    /**
+     * Bumped to restart playback without restarting the app.
+     *
+     * Every ExoPlayer and its surface is remembered against this, so incrementing it disposes the
+     * old ones — releasing their decoders — and builds fresh ones. That is what "Restart Player App"
+     * means from the Player Control panel: recycle the playback component, not the process.
+     *
+     * The distinction matters operationally. Killing and relaunching the whole app takes a signage
+     * box through a cold start — splash, pairing check, manifest reload, decoder init — which is ten
+     * or fifteen seconds of black on a public screen, loses the foreground to the launcher on boxes
+     * that are slow to come back, and throws away the socket, the queues and the in-flight
+     * heartbeat. A stuck or black video needs none of that; it needs the decoder rebuilt.
+     */
+    private val _playbackGeneration = MutableStateFlow(0)
+    val playbackGeneration: StateFlow<Int> = _playbackGeneration.asStateFlow()
+
+    /**
+     * Restart the playback component in place.
+     *
+     * Position is not preserved explicitly and does not need to be: the engine derives the frame
+     * from the clock, so the rebuilt players are handed the position the loop is genuinely at rather
+     * than the one they were at when they were torn down. On a wall this is what keeps a restarted
+     * panel in phase with its neighbours instead of restarting the loop from the top.
+     */
+    fun restartPlayback() {
+        AppLog.i(TAG, "Restarting playback (generation ${_playbackGeneration.value + 1})")
+        // Forget what each zone was playing, so the slide that was up when the decoder went down is
+        // not later reported as a completed play it never finished.
+        playing.clear()
+        _playbackGeneration.value += 1
+        // Re-assert the cached plan so a restart also recovers from a plan that failed to render,
+        // and pick up anything published while playback was broken.
+        viewModelScope.launch {
+            runCatching { graph.content.restoreCachedPlan() }
+                .onFailure { AppLog.w(TAG, "Could not re-read the cached plan on restart", it) }
+        }
+    }
+
     /** When the current plan's loop started. Reset whenever a new plan is adopted. */
     private var baseMs: Long = ServerClock.now()
     private var currentPlanIdentity: String? = null

@@ -322,6 +322,11 @@ class PlayerService : Service() {
             }
         }
 
+        // A FULL process restart here, unlike the RESTART_APP command, and deliberately so. This is
+        // the nightly Auto Restart setting: its whole purpose is to recycle the process while nobody
+        // is watching, clearing leaks and wedged native state that recreating the players cannot
+        // reach. RESTART_APP is pressed by an operator in the middle of the day and must not black
+        // out the wall, so that one rebuilds only the playback component.
         if (graph.schedules.shouldAutoRestart(settings)) {
             graph.events.appEvent(AmsConstants.LogAction.AUTO_RESTART)
             graph.proofOfPlay.flush()

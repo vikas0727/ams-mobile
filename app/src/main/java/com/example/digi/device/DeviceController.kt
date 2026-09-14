@@ -171,9 +171,48 @@ object DeviceController {
      * The framework path (`DevicePolicyManager.reboot`) is deliberately not used: it needs
      * device-owner provisioning, and this app no longer registers a device-admin component at all.
      */
+    /**
+     * REBOOT_DEVICE — restart the whole box, not the app.
+     *
+     * Android does not let an ordinary app reboot the device, and no amount of code changes that:
+     * `PowerManager.reboot` is guarded by the REBOOT permission, which is `signature|privileged`.
+     * So this walks the three routes that genuinely exist, best first, and reports which one worked
+     * — or names what the box is missing, rather than failing with "not rooted" as though root were
+     * the only possibility.
+     *
+     *  1. **PowerManager.** Works on a system-signed or privileged build, where the REBOOT
+     *     permission this app declares is actually granted. The manifest declaration is harmless
+     *     everywhere else.
+     *  2. **su.** The usual answer on the rooted Rockchip/Amlogic boxes this fleet runs on. Several
+     *     spellings are tried because the binary that exists differs per ROM: plain `reboot` is
+     *     absent on some, where `svc power reboot` goes through the framework instead.
+     *  3. **Neither.** An honest failure that says what would make it work, so an operator opens a
+     *     provisioning ticket instead of pressing the button again.
+     *
+     * A device-owner build could also use `DevicePolicyManager.reboot`, which needs no root — that
+     * requires provisioning the player as device owner and is a deployment decision, not a code one.
+     */
     fun rebootDevice(context: Context): Outcome {
-        if (runSuCommand("reboot")) return Outcome.ok("Reboot issued through su")
-        return Outcome.failed("Reboot unavailable: this box is not rooted")
+        // The framework route. Throws SecurityException on an ordinary build, which is the expected
+        // case and not worth logging as an error.
+        val viaPowerManager = runCatching {
+            val pm = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            pm.reboot(null)
+            true
+        }.getOrElse { false }
+        if (viaPowerManager) return Outcome.ok("Reboot issued through PowerManager")
+
+        // `svc power reboot` asks the framework to reboot cleanly, which unmounts and syncs;
+        // `reboot` is the direct binary. Order matters — the clean one first.
+        for (command in SU_REBOOT_COMMANDS) {
+            if (runSuCommand(command)) return Outcome.ok("Reboot issued through su ($command)")
+        }
+
+        return Outcome.failed(
+            "This device cannot be rebooted remotely: it is not rooted and the app is not " +
+                "system-signed or device-owner provisioned. Restart Player App restarts playback; " +
+                "a full reboot needs one of those three."
+        )
     }
 
     /**
@@ -247,6 +286,9 @@ object DeviceController {
     }
 
     /* ── internals ─────────────────────────────────────────────────────────── */
+
+    /** Tried in order; the clean framework route first, the direct binary as the fallback. */
+    private val SU_REBOOT_COMMANDS = listOf("svc power reboot", "reboot", "/system/bin/reboot")
 
     private fun runSuCommand(command: String): Boolean = runCatching {
         val process = Runtime.getRuntime().exec("su")
