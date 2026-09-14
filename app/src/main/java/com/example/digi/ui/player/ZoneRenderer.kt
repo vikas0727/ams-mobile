@@ -12,7 +12,9 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
@@ -206,22 +208,88 @@ private fun VideoLayer(
         onDispose { player.release() }
     }
 
-    // Keyed on the FILES, not on the list identity: the engine rebuilds its slide list on every
-    // tick, and reloading the playlist four times a second would defeat the whole exercise.
+    // Keyed on the FILES AND THEIR ORDER, not on the list identity: the engine rebuilds its slide
+    // list on every tick, and reloading the playlist four times a second would defeat the whole
+    // exercise. Order is part of the key because reordering a playlist without adding or removing
+    // anything is a real edit an operator makes, and it must reload.
     val playlistKey = remember(videoSlides) { videoSlides.joinToString("|") { it.localPath.orEmpty() } }
 
-    LaunchedEffect(playlistKey) {
-        runCatching {
-            player.setMediaItems(
-                videoSlides.map { MediaItem.fromUri(File(it.localPath!!).toURI().toString()) }
-            )
-            player.prepare()
-        }.onFailure { AppLog.e(TAG, "Could not load the video playlist for zone $zoneKey", it) }
-    }
+    /*
+     * Which playlist the ExoPlayer is ACTUALLY holding.
+     *
+     * Not the same thing as [playlistKey], which is what the engine wants it to hold — and the gap
+     * between the two is where the bug lived. Loading the playlist and positioning within it were
+     * two independent effects, so for a moment after a reorder the engine's item indices were being
+     * applied to the media items still loaded from the previous order. The player would obediently
+     * seek to "item 1" of a list that had just been replaced and show the clip that used to be
+     * there, for about a second, before the next correction moved it. An advert the operator had
+     * just moved or deleted would appear on the wall after they had published the change.
+     *
+     * Now the advance effect refuses to touch the player until this says the right playlist is in
+     * it.
+     */
+    var loadedKey by remember(zoneKey) { mutableStateOf<String?>(null) }
+
+    /** The inflated view, so the swap can control what is shown while it happens. */
+    var playerView by remember(zoneKey) { mutableStateOf<PlayerView?>(null) }
 
     val targetItem = itemIndexBySlide[slideIndex]
 
-    LaunchedEffect(targetItem, playlistKey) {
+    /*
+     * Load the playlist AND land on the right position in one call.
+     *
+     * `setMediaItems(items, startIndex, startPositionMs)` is what makes this atomic. The two-step
+     * version — replace the list, then seek — leaves a window in which the player is holding the
+     * new files at a position chosen for the old ones, which is exactly the glitch above.
+     *
+     * `slideIndex` and `startAtMs` are read at relaunch, so they are wherever the engine is at the
+     * instant the swap happens. That is the correct capture: the new playlist should pick up where
+     * the loop actually is, not where it was when this composable first ran.
+     */
+    LaunchedEffect(playlistKey) {
+        runCatching {
+            val items = videoSlides.map { MediaItem.fromUri(File(it.localPath!!).toURI().toString()) }
+            val startIndex = (targetItem ?: 0).coerceIn(0, (items.size - 1).coerceAtLeast(0))
+            val startMs = if (startAtMs > SEEK_THRESHOLD_MS) startAtMs else 0L
+
+            // Do not hold the outgoing frame across a REPLACEMENT.
+            //
+            // keepContentOnPlayerReset is right at an item boundary inside a playlist — it is what
+            // bridges the gap instead of flashing black. Across a playlist replacement it is wrong,
+            // because the frame being held is a clip that has just been reordered away or deleted,
+            // and "videos from the previous order must not appear" is the whole requirement. A few
+            // frames of the zone's background is honest; a few frames of a withdrawn advert is not.
+            playerView?.setKeepContentOnPlayerReset(false)
+
+            player.setMediaItems(items, startIndex, startMs)
+            player.prepare()
+            loadedKey = playlistKey
+        }.onFailure { AppLog.e(TAG, "Could not load the video playlist for zone $zoneKey", it) }
+    }
+
+    /*
+     * Restore the bridge once real content is on the surface again.
+     *
+     * Tied to the first rendered frame rather than restored immediately after the swap: setting it
+     * back synchronously would re-arm the hold before the new clip had drawn anything, which is the
+     * same as never having cleared it.
+     */
+    DisposableEffect(player, playerView) {
+        val view = playerView
+        val listener = object : Player.Listener {
+            override fun onRenderedFirstFrame() {
+                view?.setKeepContentOnPlayerReset(true)
+            }
+        }
+        player.addListener(listener)
+        onDispose { player.removeListener(listener) }
+    }
+
+    LaunchedEffect(targetItem, loadedKey) {
+        // The engine has moved on to a playlist the player has not loaded yet. Doing anything here
+        // would be applying new indices to old media — the bug this guard exists to prevent.
+        if (loadedKey != playlistKey) return@LaunchedEffect
+
         if (targetItem == null) {
             // An image is up. Pause rather than release: the surface stays alive and hidden, so
             // coming back to video costs nothing.
@@ -236,7 +304,8 @@ private fun VideoLayer(
             when {
                 // Already on the right clip. Correct the position only if it has genuinely drifted
                 // — seeking on every tick would flush the decoder and reintroduce the very stutter
-                // this is here to remove.
+                // this is here to remove. Safe to trust now: the guard above means `current` is an
+                // index into the playlist the engine is talking about.
                 current == targetItem -> {
                     val expected = startAtMs
                     if (expected > SEEK_THRESHOLD_MS &&
@@ -305,6 +374,7 @@ private fun VideoLayer(
                     R.layout.zone_player_view
                 }
                 val view = LayoutInflater.from(ctx).inflate(layout, null) as PlayerView
+                playerView = view
                 view.apply {
                     useController = false
                     // Transparent background: zones overlap by design (a ticker over video is the

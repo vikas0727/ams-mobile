@@ -191,10 +191,30 @@ class PlayerStore(context: Context) {
     fun saveSettings(settings: SettingsDto?) {
         if (settings == null) return
         runCatching { ApiClient.json.encodeToString(SettingsDto.serializer(), settings) }
-            .onSuccess { prefs.edit().putString(KEY_SETTINGS, it).apply() }
+            .onSuccess {
+                prefs.edit().putString(KEY_SETTINGS, it).apply()
+                _settings.value = settings
+            }
     }
 
-    fun loadSettings(): SettingsDto? {
+    fun loadSettings(): SettingsDto? = _settings.value
+
+    /**
+     * The CMS's settings, observable.
+     *
+     * Not every setting is hardware. `dotIndicators` and `fitContent` are RENDERING preferences with
+     * nothing to push at a device — the UI simply has to draw differently — and the screen was
+     * reading them once, with a bare `remember { }`, at first composition. Toggling dot indicators in
+     * the portal therefore did nothing until somebody restarted the app on the wall, which is
+     * indistinguishable from the feature being broken.
+     *
+     * Seeded from disk so a cold boot draws correctly before the first heartbeat lands, and updated
+     * by [saveSettings] on every beat thereafter.
+     */
+    private val _settings = MutableStateFlow(readStoredSettings())
+    val settings: StateFlow<SettingsDto?> get() = _settings.asStateFlow()
+
+    private fun readStoredSettings(): SettingsDto? {
         val raw = prefs.getString(KEY_SETTINGS, null) ?: return null
         return runCatching { ApiClient.json.decodeFromString(SettingsDto.serializer(), raw) }.getOrNull()
     }
@@ -220,6 +240,7 @@ class PlayerStore(context: Context) {
             .remove(KEY_CONTENT_VERSION)
             .remove(KEY_REALTIME_CAPTURE)
             .apply()
+        _settings.value = null
         _paired.value = false
         // Mirrors the pref removal above. Left set, the video layer would keep rendering through a
         // TextureView for a screen nobody is watching any more.

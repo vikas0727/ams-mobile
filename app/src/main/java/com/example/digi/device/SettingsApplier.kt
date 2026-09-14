@@ -119,11 +119,30 @@ class SettingsApplier(
         appliedAt = if (lastAppliedAtMs > 0) ServerClock.isoUtc(lastAppliedAtMs) else null,
     )
 
+    /*
+     * The cache below records what SUCCEEDED, never what was merely attempted.
+     *
+     * Both of these used to write `lastVolume = volume` before calling the hardware and then ignore
+     * the outcome. That is the difference between a setting that recovers and one that is dead for
+     * the life of the process: `setStreamVolume` throws a SecurityException when Do Not Disturb is
+     * on without policy access, and brightness silently degrades without WRITE_SETTINGS. The failure
+     * was caught and logged — and the value was remembered as applied anyway, so every later beat
+     * saw "already at 50%" and skipped it. Granting the permission afterwards changed nothing,
+     * because nothing ever tried again.
+     *
+     * Now a failed apply leaves the cache alone, so the next heartbeat retries. A screen whose
+     * permission is fixed at 10am starts obeying at 10am rather than at the next reboot.
+     */
     private fun applyVolume(settings: SettingsDto, force: Boolean, applied: MutableList<String>) {
         val volume = settings.volume ?: return
         if (!force && volume == lastVolume) return
-        lastVolume = volume
+
         val outcome = DeviceController.setVolume(context, volume)
+        if (!outcome.success) {
+            AppLog.w(TAG, "Volume ${volume}% not applied: ${outcome.detail} — will retry next beat")
+            return
+        }
+        lastVolume = volume
         applied += "volume ${volume}%${if (outcome.degraded) " (approximate)" else ""}"
     }
 
@@ -137,10 +156,25 @@ class SettingsApplier(
         if (settings.brightnessScheduleEnabled == AmsConstants.ACTIVE) return
         val level = settings.brightness ?: return
         if (!force && level == lastBrightness) return
+
+        val system = DeviceController.setSystemBrightness(context, level)
+        // The in-app dim goes on regardless. Without WRITE_SETTINGS it is the only thing that will
+        // change anything, and a kiosk showing nothing else looks identical either way — so this
+        // counts as applied even when the system value was refused.
+        val host = PlayerHost.current()
+        host?.applyWindowBrightness(level)
+
+        // `partial` means the system value was refused but the call did not fail — the only thing
+        // that actually dimmed anything in that case is the window, so it has to be present for
+        // this to count. Treating partial as success on its own is how a screen with neither
+        // permission nor a foreground window would record a brightness it never changed.
+        val systemChanged = system.success && !system.degraded
+        if (!systemChanged && host == null) {
+            AppLog.w(TAG, "Brightness ${level}% not applied: ${system.detail} — will retry next beat")
+            return
+        }
         lastBrightness = level
-        DeviceController.setSystemBrightness(context, level)
-        PlayerHost.current()?.applyWindowBrightness(level)
-        applied += "brightness ${level}%"
+        applied += "brightness ${level}%${if (!systemChanged) " (app window only)" else ""}"
     }
 
     /**

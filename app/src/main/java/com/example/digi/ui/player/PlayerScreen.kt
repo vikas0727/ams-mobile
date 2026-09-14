@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.digi.R
+import com.example.digi.core.AmsConstants
 import com.example.digi.core.DigiApp
 import com.example.digi.data.repo.ContentRepository.DownloadState
 import com.example.digi.player.PlaybackEngine
@@ -75,7 +76,19 @@ fun PlayerScreen(
     val blanked by viewModel.blanked.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
-    val dotIndicators = remember { DigiApp.graph(context).settings.dotIndicators() }
+    /*
+     * Read as a FLOW, not once.
+     *
+     * This was `remember { ... }` with no key — evaluated at first composition and never again — so
+     * toggling dot indicators in the portal changed nothing until somebody restarted the app on the
+     * wall. From an operator's chair that is indistinguishable from the setting being broken, which
+     * is exactly how it was reported.
+     *
+     * A rendering preference has nothing to push at hardware, so there is no "apply" step to hang it
+     * on; the screen simply has to redraw when the value changes, which is what collecting it does.
+     */
+    val settings by DigiApp.graph(context).store.settings.collectAsStateWithLifecycle()
+    val dotIndicators = settings?.dotIndicators == AmsConstants.ACTIVE
 
     Box(
         modifier = modifier
