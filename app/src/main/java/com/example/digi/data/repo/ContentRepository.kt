@@ -334,11 +334,48 @@ class ContentRepository(
     }
 
     /** CLEAR_CACHE and DELETE_UNUSED_MEDIA both land here. */
+    /**
+     * CLEAR_CACHE — reclaim the cache WITHOUT taking the screen down.
+     *
+     * This used to call `cache.clearAll()`, which deleted every file including the ones being played
+     * from. The plan's slides instantly became unplayable, the video layer dropped out of the
+     * composition, and the panel went black — and stayed black until the next heartbeat noticed the
+     * content was stale and re-downloaded the whole library, which on a station uplink is minutes.
+     * An operator reclaiming disk space does not expect to black out a public screen to do it.
+     *
+     * So the live set is exempt. Everything the CURRENT plan references is kept; everything else —
+     * the previous playlist's files, orphans, `.part` leftovers from interrupted downloads, media
+     * withdrawn in the CMS but never evicted — is deleted. That is the space actually worth
+     * reclaiming, and by construction nothing that is on the glass can be pulled out from under it.
+     *
+     * A full sync follows, so anything the plan needs but does not have is repaired in the same
+     * action rather than waiting for the next beat.
+     *
+     * @return how many files were removed
+     */
     suspend fun clearCache(): Int {
-        val removed = cache.clearAll()
-        // Republish immediately: every slide has just lost its local path, and the renderer must
-        // stop trying to open files that are no longer there.
-        store.loadManifest()?.let { _plan.value = planBuilder.build(it) }
+        // Read the plan first: the eviction is defined by what is playing at this instant.
+        val live = _plan.value?.allCacheKeys.orEmpty().toSet()
+
+        val removed = if (live.isEmpty()) {
+            // Nothing is playing — no content assigned, or the plan never built. Then there is
+            // nothing to protect and the operator gets the full clear they asked for.
+            cache.clearAll()
+        } else {
+            cache.retainOnly(live)
+        }
+
+        AppLog.i(
+            TAG,
+            "Cleared $removed cached file(s), keeping ${live.size} in use by the current plan"
+        )
+
+        // Re-sync rather than only invalidating. The files that survived are still on disk and still
+        // playing, so this repairs what is missing in the background instead of leaving the screen
+        // to discover it at the next heartbeat.
+        invalidate()
+        runCatching { sync() }.onFailure { AppLog.w(TAG, "Re-sync after CLEAR_CACHE failed", it) }
+
         reportInventory()
         return removed
     }

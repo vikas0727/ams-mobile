@@ -146,11 +146,14 @@ class CommandExecutor(
             }
 
             AmsConstants.Command.CLEAR_CACHE -> {
+                // The repository keeps whatever the current plan is playing and re-syncs afterwards,
+                // so this no longer blanks the panel. The invalidate+sync that used to live here is
+                // part of that call now, because doing it out here left a window where the files had
+                // gone and nothing had asked for them back yet.
                 val removed = content.clearCache()
-                // Force a re-sync: every slide has just lost its file, and waiting for the CMS to
-                // change something would leave the screen blank until it did.
-                content.invalidate()
-                DeviceController.Outcome.ok("Cleared $removed cached file(s); re-sync queued")
+                DeviceController.Outcome.ok(
+                    "Cleared $removed cached file(s); content in use was kept and re-synced"
+                )
             }
 
             AmsConstants.Command.SYNC_NOW, AmsConstants.Command.REFETCH_PLAYLIST -> {
