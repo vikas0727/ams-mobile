@@ -32,4 +32,10 @@
     <!-- Diagnostics overlay -->
     <string name="diag_title">Diagnostics</string>
     <string name="diag_close">Close</string>
+    <string name="pin_title">Enter device PIN</string>
+    <string name="pin_hint">This screen is protected. Enter the PIN set in the portal.</string>
+    <string name="pin_wrong">Incorrect PIN</string>
+    <string name="pin_clear">Clear</string>
+    <string name="pin_cancel">Cancel</string>
+    <string name="pin_ok">Unlock</string>
 </resources>

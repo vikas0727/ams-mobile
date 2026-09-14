@@ -5,14 +5,17 @@ import com.example.digi.core.AmsConstants
 import com.example.digi.core.AppLog
 import com.example.digi.core.PlayerHost
 import com.example.digi.data.local.PlayerStore
+import com.example.digi.data.remote.ApiClient
 import com.example.digi.data.remote.ApiResult
 import com.example.digi.data.remote.PlayerApi
 import com.example.digi.data.remote.apiCall
+import com.example.digi.data.remote.dto.SettingsDto
 import com.example.digi.data.repo.CommandRepository
 import com.example.digi.data.repo.ContentRepository
 import com.example.digi.data.repo.EventReporter
 import com.example.digi.data.repo.ProofOfPlayRecorder
 import com.example.digi.device.DeviceController
+import com.example.digi.device.SettingsApplier
 import com.example.digi.media.MediaCache
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -47,6 +50,7 @@ class CommandExecutor(
     private val cache: MediaCache,
     private val events: EventReporter,
     private val proofOfPlay: ProofOfPlayRecorder,
+    private val settingsApplier: SettingsApplier,
 ) {
 
     /** Set when a command asks for a restart; the service performs it after the ack has gone out. */
@@ -207,9 +211,30 @@ class CommandExecutor(
             }
 
             AmsConstants.Command.APPLY_CONFIG -> {
-                // Settings arrive on every heartbeat anyway; this forces the pass that applies them
-                // to hardware (volume, brightness, kiosk) without waiting for the next beat.
-                DeviceController.Outcome.ok("Settings will be applied on the next tick")
+                /*
+                 * This used to return "settings will be applied on the next tick" and apply
+                 * nothing — the settings arrived, were stored, and were then acted on only for
+                 * volume and brightness. Worse, it acked SUCCESS, so the CMS showed a clean command
+                 * history for a change the screen had not made. A setting that visibly fails gets
+                 * reported; one that silently succeeds costs somebody a week of doubting their eyes.
+                 *
+                 * It now runs the real pass, forced — an operator who pressed Save is entitled to
+                 * have the device re-assert the value even where it believes it already matches —
+                 * and reports back exactly what it managed and what this hardware cannot do.
+                 */
+                val settings = pending.payload.settings() ?: store.loadSettings()
+                if (settings == null) {
+                    DeviceController.Outcome.failed("No settings to apply — none in the payload and none cached")
+                } else {
+                    // Cache the payload's copy so a later cold start applies it too, rather than
+                    // reverting to whatever the last heartbeat happened to carry.
+                    store.saveSettings(settings)
+                    val result = settingsApplier.apply(settings, force = true)
+                    if (result.skipped.isEmpty()) DeviceController.Outcome.ok(result.summary)
+                    // Degraded, not failed: the supported settings really were applied, and calling
+                    // the whole command a failure would hide that.
+                    else DeviceController.Outcome.partial(result.summary)
+                }
             }
 
             AmsConstants.Command.START_REALTIME_CAPTURE -> {
@@ -269,6 +294,24 @@ class CommandExecutor(
         val value = pendingRestart
         pendingRestart = false
         return value
+    }
+
+    /**
+     * `{settings: {...}}` as APPLY_CONFIG carries it.
+     *
+     * Returns null rather than throwing on a payload this build cannot parse — a newer CMS may send
+     * a field this app has never heard of, and refusing the whole command over one unknown key
+     * would strand every setting in it. kotlinx is configured to ignore unknown keys for exactly
+     * this reason; this catch is for a payload that is not a settings object at all.
+     */
+    private fun JsonObject?.settings(): SettingsDto? {
+        val element: JsonElement = this?.get("settings") ?: return null
+        return runCatching {
+            ApiClient.json.decodeFromJsonElement(SettingsDto.serializer(), element)
+        }.getOrElse {
+            AppLog.w(TAG, "APPLY_CONFIG payload could not be read; falling back to the cached settings", it)
+            null
+        }
     }
 
     /** `{level: 0-100}` for both volume and brightness. */

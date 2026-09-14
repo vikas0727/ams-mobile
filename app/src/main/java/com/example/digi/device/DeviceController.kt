@@ -8,6 +8,7 @@ import android.media.AudioManager
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
+import android.view.Surface
 import android.view.WindowManager
 import com.example.digi.core.AppLog
 import java.io.DataOutputStream
@@ -55,6 +56,41 @@ object DeviceController {
     fun canWriteSystemSettings(context: Context): Boolean = runCatching {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Settings.System.canWrite(context) else true
     }.getOrDefault(false)
+
+    /* ── rotation ──────────────────────────────────────────────────────────── */
+
+    /**
+     * Rotate the physical panel.
+     *
+     * Writes USER_ROTATION and turns accelerometer rotation off, which is the only way to hold a
+     * signage panel at a fixed angle — left on, the box would rotate back the moment its sensor
+     * disagreed.
+     *
+     * Requires WRITE_SETTINGS, which an ordinary installation does not hold. That is reported
+     * rather than swallowed: the app-canvas rotation is what actually turns the picture on an
+     * unprovisioned box, and an operator needs to know which of the two took effect rather than
+     * being told both did.
+     */
+    fun setPanelRotation(context: Context, degrees: Int): Outcome {
+        if (!canWriteSystemSettings(context)) {
+            return Outcome.failed("WRITE_SETTINGS not granted; the app canvas was rotated instead")
+        }
+        val value = when (degrees) {
+            0 -> Surface.ROTATION_0
+            90 -> Surface.ROTATION_90
+            180 -> Surface.ROTATION_180
+            270 -> Surface.ROTATION_270
+            else -> return Outcome.failed("Unsupported rotation ${degrees}")
+        }
+        return runCatching {
+            Settings.System.putInt(context.contentResolver, Settings.System.ACCELEROMETER_ROTATION, 0)
+            Settings.System.putInt(context.contentResolver, Settings.System.USER_ROTATION, value)
+            Outcome.ok("Panel rotated to ${degrees}")
+        }.getOrElse {
+            AppLog.w(TAG, "Could not rotate the panel", it)
+            Outcome.failed(it.message ?: "rotation refused by the platform")
+        }
+    }
 
     /* ── volume ────────────────────────────────────────────────────────────── */
 

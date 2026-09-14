@@ -97,6 +97,17 @@ class PlayerStore(context: Context) {
         get() = prefs.getInt(KEY_CONTENT_VERSION, -1)
         set(value) = prefs.edit().putInt(KEY_CONTENT_VERSION, value).apply()
 
+    /**
+     * The app canvas rotation last applied, in degrees.
+     *
+     * Persisted so a cold start comes up the right way round straight away. Reading it out of the
+     * cached settings blob instead would work, but only after the first composition — the screen
+     * would show landscape for a beat and then swing, in front of whoever is standing there.
+     */
+    var appRotationDegrees: Int
+        get() = prefs.getInt(KEY_APP_ROTATION, 0)
+        set(value) = prefs.edit().putInt(KEY_APP_ROTATION, if (value in ROTATIONS) value else 0).apply()
+
     var heartbeatIntervalSeconds: Int
         get() = prefs.getInt(KEY_HEARTBEAT, com.example.digi.core.AmsConstants.DEFAULT_HEARTBEAT_SECONDS)
         set(value) = prefs.edit().putInt(KEY_HEARTBEAT, value.coerceIn(10, 3600)).apply()
@@ -197,5 +208,7 @@ class PlayerStore(context: Context) {
         const val KEY_REALTIME_CAPTURE = "realtime_capture"
         const val KEY_MANIFEST = "manifest_json"
         const val KEY_SETTINGS = "settings_json"
+        const val KEY_APP_ROTATION = "app_rotation_degrees"
+        private val ROTATIONS = setOf(0, 90, 180, 270)
     }
 }

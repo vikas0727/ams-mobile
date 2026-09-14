@@ -12,15 +12,38 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.digi.R
 import com.example.digi.core.AppLog
 import com.example.digi.core.DigiApp
 import com.example.digi.core.PlayerHost
@@ -32,13 +55,13 @@ import com.example.digi.ui.pairing.PairingViewModel
 import com.example.digi.ui.player.PlayerScreen
 import com.example.digi.ui.player.PlayerViewModel
 import com.example.digi.ui.theme.DigiTheme
+import java.io.File
+import java.io.FileOutputStream
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
-import java.io.FileOutputStream
 
 /**
  * The only Activity: pairing screen, or the wall.
@@ -74,7 +97,9 @@ class MainActivity : ComponentActivity(), PlayerHost {
                 val paired by store.paired.collectAsStateWithLifecycle()
                 val showDiagnostics by diagnosticsVisible.collectAsStateWithLifecycle()
 
-                Box(Modifier.fillMaxSize().background(Color.Black)) {
+                val rotation by appRotation.collectAsStateWithLifecycle()
+
+                RotatedCanvas(rotation, Modifier.fillMaxSize().background(Color.Black)) {
                     if (paired) {
                         val vm: PlayerViewModel = viewModel()
                         playerViewModel = vm
@@ -87,6 +112,19 @@ class MainActivity : ComponentActivity(), PlayerHost {
                                 // Restart the service loop so it picks up the new credential
                                 // immediately rather than on its next heartbeat.
                                 PlayerService.start(this@MainActivity)
+                            },
+                        )
+                    }
+
+                    val askingForPin by pinPrompt.collectAsStateWithLifecycle()
+                    if (askingForPin) {
+                        PinGate(
+                            expected = { DigiApp.graph(this@MainActivity).settings.devicePassword() },
+                            onCancel = { pinPrompt.value = false },
+                            onAccepted = {
+                                pinAccepted.value = true
+                                pinPrompt.value = false
+                                diagnosticsVisible.value = true
                             },
                         )
                     }
@@ -115,6 +153,28 @@ class MainActivity : ComponentActivity(), PlayerHost {
      * during composition would reassign it on every recomposition for no benefit.
      */
     private val diagnosticsVisible = MutableStateFlow(false)
+
+    /**
+     * Set once the on-device PIN has been entered, for as long as this Activity lives.
+     *
+     * Per-session rather than remembered: `deviceProtection` exists so that site staff standing at
+     * a panel cannot reach diagnostics or unpair the screen, and a PIN that stayed satisfied across
+     * a reboot would protect nothing the morning after an engineer used it.
+     */
+    private val pinAccepted = MutableStateFlow(false)
+    private val pinPrompt = MutableStateFlow(false)
+
+    /**
+     * The app canvas rotation, in degrees.
+     *
+     * Seeded from the last applied value so a cold start comes up the right way round rather than
+     * showing landscape for a beat and then swinging in front of whoever is watching.
+     */
+    private val appRotation by lazy { MutableStateFlow(DigiApp.graph(this).store.appRotationDegrees) }
+
+    override fun applyAppRotation(degrees: Int) {
+        appRotation.value = if (degrees in setOf(0, 90, 180, 270)) degrees else 0
+    }
 
     override fun onResume() {
         super.onResume()
@@ -153,7 +213,15 @@ class MainActivity : ComponentActivity(), PlayerHost {
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         return when (keyCode) {
             KeyEvent.KEYCODE_INFO, KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_PROG_YELLOW -> {
-                diagnosticsVisible.value = !diagnosticsVisible.value
+                if (diagnosticsVisible.value) {
+                    diagnosticsVisible.value = false
+                } else {
+                    // `deviceProtection` with a password set: the PIN prompt stands in front of
+                    // diagnostics, which is where Unpair lives.
+                    val password = DigiApp.graph(this).settings.devicePassword()
+                    if (password != null && !pinAccepted.value) pinPrompt.value = true
+                    else diagnosticsVisible.value = true
+                }
                 true
             }
             KeyEvent.KEYCODE_BACK -> {
@@ -280,4 +348,133 @@ class MainActivity : ComponentActivity(), PlayerHost {
     private companion object {
         const val TAG = "MainActivity"
     }
+}
+
+/**
+ * The player's canvas, turned by [degrees].
+ *
+ * The trick is that a 90 or 270 degree turn has to swap the box's width and height BEFORE rotating
+ * it: rotation happens about the centre and does not resize anything, so rotating a
+ * 1920x1080 box by ninety degrees inside a 1920x1080 window leaves a 1080-wide picture with bars
+ * either side and the top and bottom cropped off. Laying it out 1080x1920 first and then turning it
+ * lands it exactly over the panel.
+ *
+ * Done in the drawing layer rather than through `requestedOrientation`, which is advisory: plenty of
+ * TV boxes lock themselves to landscape and ignore it, and the ones that honour it recreate the
+ * Activity — restarting playback every time an operator changes a setting.
+ */
+@Composable
+private fun RotatedCanvas(
+    degrees: Int,
+    modifier: Modifier = Modifier,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    if (degrees == 0) {
+        Box(modifier, content = content)
+        return
+    }
+
+    BoxWithConstraints(modifier) {
+        val swap = degrees == 90 || degrees == 270
+        Box(
+            modifier = Modifier
+                .size(
+                    width = if (swap) maxHeight else maxWidth,
+                    height = if (swap) maxWidth else maxHeight,
+                )
+                .align(Alignment.Center)
+                .graphicsLayer { rotationZ = degrees.toFloat() },
+            content = content,
+        )
+    }
+}
+
+/**
+ * The on-device PIN prompt for `deviceProtection`.
+ *
+ * Numeric and driven from a TV remote — there is no keyboard on a signage box, and the field this
+ * checks against is described in the CMS as a PIN. The comparison is a plain string match because
+ * that is what the CMS stores; this gate keeps a passer-by out of diagnostics, and it is not, and
+ * should not be mistaken for, a secret worth protecting cryptographically.
+ *
+ * Cancels back to content rather than trapping anyone: a wrong guess must not leave a public screen
+ * sitting behind a modal.
+ */
+@Composable
+private fun PinGate(
+    expected: () -> String?,
+    onCancel: () -> Unit,
+    onAccepted: () -> Unit,
+) {
+    var entered by remember { mutableStateOf("") }
+    var wrong by remember { mutableStateOf(false) }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color(0xE6070B12)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = stringResource(R.string.pin_title),
+                color = Color.White,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(14.dp))
+            Text(
+                text = if (entered.isEmpty()) "—" else "•".repeat(entered.length),
+                color = if (wrong) Color(0xFFFF6B6B) else Color.White,
+                fontSize = 28.sp,
+                letterSpacing = 6.sp,
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = stringResource(if (wrong) R.string.pin_wrong else R.string.pin_hint),
+                color = Color(0xFF9AA4B2),
+                fontSize = 12.sp,
+            )
+            Spacer(Modifier.height(18.dp))
+
+            // A remote's number keys reach the Activity, not a composable, so the digits are laid
+            // out as focusable buttons that a D-pad can walk.
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                (0..9).forEach { digit ->
+                    Box(
+                        Modifier
+                            .size(34.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color(0xFF1B2434))
+                            .clickable {
+                                wrong = false
+                                if (entered.length < 12) entered += digit.toString()
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) { Text("$digit", color = Color.White, fontSize = 14.sp) }
+                }
+            }
+
+            Spacer(Modifier.height(14.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                GateButton(stringResource(R.string.pin_clear)) { entered = ""; wrong = false }
+                GateButton(stringResource(R.string.pin_cancel)) { onCancel() }
+                GateButton(stringResource(R.string.pin_ok)) {
+                    if (entered.isNotEmpty() && entered == expected()) onAccepted()
+                    else { wrong = true; entered = "" }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun GateButton(label: String, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(Color(0xFF243047))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 7.dp),
+    ) { Text(label, color = Color.White, fontSize = 13.sp) }
 }

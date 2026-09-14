@@ -282,60 +282,12 @@ class PlayerService : Service() {
     /**
      * Push the CMS's settings onto the hardware.
      *
-     * Only on change — writing the same volume every minute would fight a local adjustment
-     * forever, and a site engineer turning a wall down by hand for ten minutes is a legitimate
-     * thing to allow until the next real change comes down.
+     * Delegated so that this pass and the APPLY_CONFIG command run exactly the same code. They used
+     * to be different: this applied two fields, and the command applied nothing at all while
+     * reporting success.
      */
     private fun applySettings(settings: SettingsDto?) {
-        if (settings == null) return
-
-        settings.volume?.let { volume ->
-            if (volume != state.value.appliedVolume) {
-                state.value = state.value.copy(appliedVolume = volume)
-                DeviceController.setVolume(this, volume)
-            }
-        }
-
-        // Brightness is applied here only when no schedule owns it; otherwise the schedule wins and
-        // the two would overwrite each other every tick.
-        if (settings.brightnessScheduleEnabled != AmsConstants.ACTIVE) {
-            settings.brightness?.let { level ->
-                if (level != state.value.appliedBrightness) {
-                    state.value = state.value.copy(appliedBrightness = level)
-                    DeviceController.setSystemBrightness(this, level)
-                    PlayerHost.current()?.applyWindowBrightness(level)
-                }
-            }
-        }
-
-        // settings.kioskMode and settings.lockDeviceSettings are deliberately IGNORED. Both are
-        // device-lockdown switches, kioskMode defaults to on in the CMS, and honouring it was what
-        // raised Android's "App is pinned" dialog on every unprovisioned box. Locking a device down
-        // belongs to the deployment (MDM or device-owner provisioning), not to the player.
-    }
-
-    /**
-     * Flush the moment a link returns rather than waiting out the rest of an interval.
-     *
-     * On a station uplink that flaps every few minutes, the difference is whether an hour of
-     * proof-of-play sits on disk through windows where it could have been delivered.
-     */
-    private suspend fun watchNetwork() {
-        graph.network.online.drop(1).collect { online ->
-            if (online) {
-                AppLog.i(TAG, "Network restored — flushing queues")
-                graph.events.appEvent(AmsConstants.LogAction.NETWORK_RESTORED)
-                // Before the other queues: this is the one that decides what the CMS uptime grid
-                // says about the outage that just ended, and it is the cheapest of the three.
-                runCatching { graph.heartbeat.flushBuffered() }
-                    .onFailure { AppLog.w(TAG, "Heartbeat backfill failed", it) }
-                flushQueues()
-                graph.content.reportInventory()
-            } else {
-                AppLog.i(TAG, "Network lost — playback continues from cache")
-                graph.events.appEvent(AmsConstants.LogAction.NETWORK_LOST)
-            }
-        }
+        graph.settings.apply(settings)
     }
 
     /* ── foreground plumbing ────────────────────────────────────────────────── */

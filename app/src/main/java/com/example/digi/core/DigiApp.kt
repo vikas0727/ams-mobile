@@ -16,6 +16,7 @@ import com.example.digi.data.repo.PairingRepository
 import com.example.digi.data.repo.ProofOfPlayRecorder
 import com.example.digi.device.DeviceInfoCollector
 import com.example.digi.device.ScheduleEnforcer
+import com.example.digi.device.SettingsApplier
 import com.example.digi.device.TelemetryCollector
 import com.example.digi.media.MediaCache
 import com.example.digi.service.CommandExecutor
@@ -70,6 +71,10 @@ class DigiApp : Application() {
 
         val schedules: ScheduleEnforcer by lazy { ScheduleEnforcer() }
 
+        /** Player Settings -> device behaviour. One owner, so the heartbeat pass and the
+         *  APPLY_CONFIG command cannot drift apart on what a setting means. */
+        val settings: SettingsApplier by lazy { SettingsApplier(app, store) }
+
         val events: EventReporter by lazy { EventReporter(api, database.eventLogDao(), store) }
 
         val proofOfPlay: ProofOfPlayRecorder by lazy {
@@ -105,6 +110,7 @@ class DigiApp : Application() {
                 cache = mediaCache,
                 events = events,
                 proofOfPlay = proofOfPlay,
+                settingsApplier = settings,
             )
         }
     }

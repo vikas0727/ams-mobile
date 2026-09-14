@@ -62,6 +62,14 @@ class ProofOfPlayRecorder(
         completed: Boolean,
         itemType: String = AmsConstants.ItemType.MEDIA,
     ) {
+        // `analyticsEnabled` off means the site has opted out of play reporting, so nothing is
+        // collected at all rather than collected and withheld. Gating the upload instead would
+        // leave a growing local record of exactly the thing somebody asked not to be recorded.
+        //
+        // Absent settings default to ON, matching the CMS default — a screen that has never synced
+        // should not silently lose the billing evidence its adverts are paid against.
+        if (store.loadSettings()?.analyticsEnabled == AmsConstants.INACTIVE) return
+
         // No media id means nothing the CMS can attribute a play to — a blank cluster cell, or a
         // slide whose media was deleted server-side between sync and render.
         if (mediaId.isNullOrBlank()) return

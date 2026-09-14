@@ -59,6 +59,15 @@ object ServerClock {
      * @param receivedAtLocal local millis when the response arrived
      */
     fun observe(serverTimeIso: String?, receivedAtLocal: Long = System.currentTimeMillis()) {
+        // `syncTimeFromServer` is honoured HERE rather than at each of the four call sites, so a
+        // new one cannot be added that quietly ignores the setting. Off means the site runs its own
+        // time source — an NTP-disciplined box, or a network that deliberately holds a local
+        // offset — and a player second-guessing that would fight it every heartbeat.
+        //
+        // Null settings (a device that has never synced) default to ON, matching the CMS default:
+        // a screen with a wrong clock and no settings yet is the case time sync exists for.
+        if (store?.loadSettings()?.syncTimeFromServer == AmsConstants.INACTIVE) return
+
         val serverMs = parseIsoMillis(serverTimeIso) ?: return
         val observed = serverMs - receivedAtLocal
         val delta = observed - offsetMs

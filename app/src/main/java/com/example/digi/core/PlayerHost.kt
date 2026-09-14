@@ -35,6 +35,15 @@ interface PlayerHost {
     /** The fallback when WRITE_SETTINGS is not granted: dim this app's own window. */
     fun applyWindowBrightness(level: Int)
 
+    /**
+     * Turn the app's canvas by 0, 90, 180 or 270 degrees.
+     *
+     * Drawn rotated rather than handed to `requestedOrientation`, which is advisory: plenty of TV
+     * boxes lock themselves to landscape and ignore it, and the ones that honour it recreate the
+     * Activity, which restarts playback in front of whoever is watching.
+     */
+    fun applyAppRotation(degrees: Int)
+
     /** POWER_OFF with no CEC control available: render black and mute, but keep the loop running so
      *  POWER_ON resumes in the right place rather than restarting it. */
     fun setBlanked(blanked: Boolean)

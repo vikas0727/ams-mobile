@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
@@ -19,10 +20,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -30,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.digi.R
+import com.example.digi.core.DigiApp
 import com.example.digi.data.repo.ContentRepository.DownloadState
 import com.example.digi.player.PlaybackEngine
 
@@ -70,6 +74,9 @@ fun PlayerScreen(
     val download by viewModel.downloadState.collectAsStateWithLifecycle()
     val blanked by viewModel.blanked.collectAsStateWithLifecycle()
 
+    val context = LocalContext.current
+    val dotIndicators = remember { DigiApp.graph(context).settings.dotIndicators() }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -85,6 +92,9 @@ fun PlayerScreen(
         val current = frame
         if (current != null) {
             LayoutCanvas(current)
+            // The CMS's `dotIndicators` setting, honoured. Read at draw time rather than pushed,
+            // because it is a rendering preference with nothing to "apply" to hardware.
+            if (dotIndicators) SlideDots(current, Modifier.align(Alignment.BottomCenter))
             // Playing, but a newer playlist is still coming down. Small and out of the way.
             (download as? DownloadState.Downloading)?.let { DownloadChip(it) }
         } else {
@@ -275,6 +285,41 @@ private fun DownloadChip(state: DownloadState.Downloading) {
                 modifier = Modifier.width(200.dp),
                 color = Accent,
                 trackColor = Track,
+            )
+        }
+    }
+}
+
+/**
+ * Slide position dots, as the CMS's `dotIndicators` setting asks for.
+ *
+ * Drawn for the busiest zone — the one with the most slides — because a layout can have several
+ * running at different lengths and a row of dots that tracked a two-item ticker while a ten-item
+ * main zone cycled underneath would be telling the viewer something untrue about the loop.
+ *
+ * Deliberately small and low-contrast. This sits on a public screen: it is an operator's aid, not
+ * part of the advert somebody paid for.
+ */
+@Composable
+private fun SlideDots(frame: PlaybackEngine.Frame, modifier: Modifier = Modifier) {
+    val zone = frame.zones.maxByOrNull { it.zone.slides.size } ?: return
+    val count = zone.zone.slides.size
+    if (count < 2) return
+
+    Row(
+        modifier = modifier.padding(bottom = 18.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        repeat(count) { index ->
+            Box(
+                Modifier
+                    .size(if (index == zone.slideIndex) 8.dp else 6.dp)
+                    .clip(CircleShape)
+                    .background(
+                        if (index == zone.slideIndex) Color.White.copy(alpha = 0.85f)
+                        else Color.White.copy(alpha = 0.35f)
+                    )
             )
         }
     }
