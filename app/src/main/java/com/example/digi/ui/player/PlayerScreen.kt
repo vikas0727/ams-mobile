@@ -18,6 +18,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -102,19 +103,25 @@ private fun LayoutCanvas(frame: PlaybackEngine.Frame) {
             .sortedBy { it.zone.zIndex }
             .forEach { zoneFrame ->
                 val zone = zoneFrame.zone
-                ZoneContent(
-                    zoneFrame = zoneFrame,
-                    muted = zone.muted,
-                    modifier = Modifier
-                        .offset(
-                            x = panelWidth * zone.x,
-                            y = panelHeight * zone.y,
-                        )
-                        .size(
-                            width = panelWidth * zone.width,
-                            height = panelHeight * zone.height,
-                        ),
-                )
+                // Keyed by zone, so Compose identifies these by WHICH zone rather than by position
+                // in the list. Without it a layout change that reorders or drops a zone slides the
+                // remembered state — including the zone's ExoPlayer and its live surface — onto a
+                // different zone, which is a black flash at best and the wrong clip at worst.
+                key(zone.key) {
+                    ZoneContent(
+                        zoneFrame = zoneFrame,
+                        muted = zone.muted,
+                        modifier = Modifier
+                            .offset(
+                                x = panelWidth * zone.x,
+                                y = panelHeight * zone.y,
+                            )
+                            .size(
+                                width = panelWidth * zone.width,
+                                height = panelHeight * zone.height,
+                            ),
+                    )
+                }
             }
     }
 }
