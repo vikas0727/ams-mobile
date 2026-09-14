@@ -134,6 +134,15 @@ class ContentRepository(
                 contentVersion = body.contentVersion ?: -1,
             )
             body.contentVersion?.let { store.contentVersion = it }
+
+            // Clean up BEFORE reporting, and before returning.
+            //
+            // This path used to return here, which is how an unassigned playlist left its media on
+            // the box forever: the screen correctly switched to "No Content Assigned" and then
+            // never ran a single eviction pass again, because every subsequent sync took this same
+            // early exit. The files were invisible to the operator too — the CMS kept listing them
+            // as present, since the device had no reason to re-report.
+            applyRetention(body)
             reportInventory()
             return@withLock true
         }
@@ -158,9 +167,40 @@ class ContentRepository(
         )
         events.appEvent(AmsConstants.LogAction.SYNC_COMPLETED, status = body.contentSource)
 
+        // Evict first, then report. The other way round told the CMS about files that were about to
+        // be deleted a moment later, so the Downloaded Files tab was reliably one sync out of date.
+        applyRetention(body)
         reportInventory()
-        cache.evictOrphans()
         true
+    }
+
+    /**
+     * Delete anything this screen is no longer assigned.
+     *
+     * The server sends an absolute list of what the device may keep, and it is deliberately wider
+     * than the current manifest: content whose schedule window happens to be shut is still assigned
+     * to this panel, and deleting it because it is not on screen at this moment would re-download
+     * it every day.
+     *
+     * The null check is the important line. An empty list is a real instruction — "you should be
+     * holding nothing" — which is exactly what an unassigned screen must act on. A MISSING list is
+     * not: it means an older backend, or a server that failed to compute one, and treating that as
+     * "delete everything" would wipe a fleet on a bad deploy. Missing falls back to the old
+     * conservative sweep, which only removes what no manifest has mentioned in a day.
+     */
+    private suspend fun applyRetention(body: SyncResponse) {
+        val retain = body.retainCacheKeys
+        if (retain == null) {
+            cache.evictOrphans()
+            return
+        }
+        val removed = cache.retainOnly(retain)
+        if (removed > 0) {
+            events.appEvent(
+                action = AmsConstants.LogAction.CACHE_CLEARED,
+                status = "Removed $removed unassigned file(s)",
+            )
+        }
     }
 
     /**

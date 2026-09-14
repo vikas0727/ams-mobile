@@ -95,6 +95,12 @@ object AmsConstants {
         const val POWER_OFF_SCHEDULE = "POWER_OFF_SCHEDULE"
         const val POWER_ON_SCHEDULE = "POWER_ON_SCHEDULE"
         const val AUTO_RESTART = "AUTO_RESTART"
+
+        /** Files removed because the screen is no longer assigned them. Worth a log line: an
+         *  operator asking "where did that campaign go" deserves to see when it was let go of, and
+         *  from which screen. The backend takes `action` as a free string by design, so a new event
+         *  name needs no migration. */
+        const val CACHE_CLEARED = "CACHE_CLEARED"
     }
 
     /** ITEM_TYPE_ARRAY. A manifest always arrives flattened to `media` — sequences are expanded

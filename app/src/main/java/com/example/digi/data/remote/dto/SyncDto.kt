@@ -23,6 +23,21 @@ data class SyncResponse(
     val serverTime: String? = null,
     val syncedAt: String? = null,
 
+    /**
+     * Every cache key this screen is allowed to keep on disk. Anything else is deleted.
+     *
+     * Not the same thing as the media in this manifest, and the difference is the whole point.
+     * This is what the screen is ASSIGNED; the manifest is what is playing at this instant. A shop's
+     * evening loop is not on screen at eleven in the morning but it is still that panel's content,
+     * so it stays cached rather than being re-downloaded nightly over a station uplink.
+     *
+     * Null means the server did not send one — an older backend, or a server that could not compute
+     * it. Null is "keep what you have", never "delete everything": an empty LIST is a real
+     * instruction that a screen should be holding nothing, and a failure must not be able to
+     * impersonate one.
+     */
+    val retainCacheKeys: List<String>? = null,
+
     /* --- the playlist path --- */
     val deployment: DeploymentDto? = null,
     val playlist: ManifestDto? = null,

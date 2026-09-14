@@ -251,6 +251,60 @@ class MediaCache(
         removed
     }
 
+    /**
+     * Keep exactly these assets and delete everything else.
+     *
+     * The server's answer to "what is this screen entitled to hold", applied literally. It replaces
+     * guessing from [evictOrphans], which could only ever ask "has a manifest mentioned this
+     * lately?" — a question with the wrong answer in both directions. Content that was unassigned
+     * stayed on disk forever, because the sync that removed it returned early and never reached an
+     * eviction pass. Content that was merely out of its schedule window looked identical to content
+     * that had been deleted, so any rule aggressive enough to clean up the first would re-download
+     * the second every single day.
+     *
+     * An EMPTY list is a legitimate instruction and clears the disk — that is precisely the
+     * unassign case, where the screen should be holding nothing and showing "No Content Assigned".
+     * The caller is responsible for never passing an empty list it merely failed to populate; see
+     * ContentRepository, which only applies a list the server actually sent.
+     *
+     * Stray `.part` files go too. A download killed mid-flight leaves one behind, it is in no row,
+     * and nothing else in the app would ever remove it — which over a year of interrupted syncs is
+     * how a 27GB box fills up with nothing anybody can name.
+     *
+     * @return how many assets were removed
+     */
+    suspend fun retainOnly(keys: Collection<String>): Int = withContext(Dispatchers.IO) {
+        val keep = keys.toHashSet()
+        val all = dao.all()
+        var removed = 0
+
+        for (row in all) {
+            if (keep.contains(row.cacheKey)) continue
+            val file = File(row.localPath)
+            if (runCatching { file.delete() }.getOrDefault(false) || !file.exists()) {
+                dao.delete(row.cacheKey)
+                removed++
+            } else {
+                // A file that will not delete — held open by the player, or a permissions problem.
+                // Leave the row so the next pass tries again rather than reporting an inventory
+                // that claims disk is free when it is not.
+                AppLog.w(TAG, "Could not delete ${file.name}; leaving its row for the next pass")
+            }
+        }
+
+        // Anything in the cache directory that no surviving row points at: the `.part` leftovers,
+        // and any file orphaned by a row that was lost to a destructive schema migration.
+        val keptPaths = dao.all().map { it.localPath }.toHashSet()
+        root.listFiles()?.forEach { file ->
+            if (file.absolutePath !in keptPaths) runCatching { file.delete() }
+        }
+
+        if (removed > 0) {
+            AppLog.i(TAG, "Removed $removed unassigned asset(s); ${keep.size} retained")
+        }
+        removed
+    }
+
     /** CLEAR_CACHE: everything goes, including the rows, so the next inventory report is honest. */
     suspend fun clearAll(): Int = withContext(Dispatchers.IO) {
         val all = dao.all()
