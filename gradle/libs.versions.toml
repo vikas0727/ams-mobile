@@ -11,6 +11,8 @@ composeBom = "2024.10.01"
 
 retrofit = "2.11.0"
 okhttp = "4.12.0"
+# Speaks Engine.IO/Socket.IO v4, matching the socket.io the backend runs.
+socketio = "2.1.1"
 serialization = "1.7.3"
 retrofitSerialization = "1.0.0"
 
@@ -51,6 +53,10 @@ retrofit = { group = "com.squareup.retrofit2", name = "retrofit", version.ref = 
 retrofit-serialization = { group = "com.jakewharton.retrofit", name = "retrofit2-kotlinx-serialization-converter", version.ref = "retrofitSerialization" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 okhttp-logging = { group = "com.squareup.okhttp3", name = "logging-interceptor", version.ref = "okhttp" }
+# The push nudge. `exclude` because it bundles its own OkHttp via engine.io-client and the
+# duplicate loses to whichever wins the classpath, which is how you get a TLS stack that is
+# not the one the interceptors were built against.
+socketio-client = { group = "io.socket", name = "socket.io-client", version.ref = "socketio" }
 
 androidx-room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
 androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }

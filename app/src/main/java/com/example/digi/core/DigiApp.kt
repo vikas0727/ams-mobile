@@ -8,6 +8,7 @@ import com.example.digi.data.local.DigiDatabase
 import com.example.digi.data.local.PlayerStore
 import com.example.digi.data.remote.ApiClient
 import com.example.digi.data.remote.PlayerApi
+import com.example.digi.data.remote.RealtimeChannel
 import com.example.digi.data.repo.CommandRepository
 import com.example.digi.data.repo.ContentRepository
 import com.example.digi.data.repo.EventReporter
@@ -64,6 +65,25 @@ class DigiApp : Application() {
         val api: PlayerApi by lazy { ApiClient.create { store.playerToken } }
 
         val mediaCache: MediaCache by lazy { MediaCache(app, database.cachedAssetDao()) }
+
+        /**
+         * The push nudge. Its callbacks are set by [com.example.digi.service.PlayerService], which
+         * owns the loop they wake — the graph builds the object, the service decides what a nudge
+         * means.
+         */
+        val realtime: RealtimeChannel by lazy {
+            RealtimeChannel(
+                store = store,
+                baseUrl = com.example.digi.BuildConfig.API_BASE_URL,
+                onContentChanged = { onPush?.invoke("content-updated") },
+                onCommandQueued = { onPush?.invoke("command-queued") },
+            )
+        }
+
+        /** Set by the service once it is running; null before that, so an early nudge is dropped
+         *  rather than crashing on a loop that does not exist yet. */
+        @Volatile
+        var onPush: ((String) -> Unit)? = null
 
         val deviceInfo: DeviceInfoCollector by lazy { DeviceInfoCollector(app, network) }
 

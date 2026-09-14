@@ -111,6 +111,15 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
 
+    // Real-time content nudges. Optional in practice: every failure path in RealtimeChannel falls
+    // back to the heartbeat, so a network that blocks sockets costs latency, not function.
+    implementation(libs.socketio.client) {
+        // engine.io-client ships its own OkHttp; the app already has one and two on a classpath is
+        // a coin toss over which TLS stack the interceptors actually run against.
+        exclude(group = "com.squareup.okhttp3", module = "okhttp")
+        exclude(group = "org.json", module = "json")
+    }
+
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)

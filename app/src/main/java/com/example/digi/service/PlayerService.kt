@@ -10,6 +10,8 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
+import com.example.digi.MainActivity
 import com.example.digi.R
 import com.example.digi.core.AmsConstants
 import com.example.digi.core.AppLog
@@ -18,12 +20,12 @@ import com.example.digi.core.PlayerHost
 import com.example.digi.core.ServerClock
 import com.example.digi.data.remote.dto.SettingsDto
 import com.example.digi.device.DeviceController
-import com.example.digi.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -31,6 +33,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * The device loop, as a foreground service.
@@ -60,6 +63,19 @@ class PlayerService : Service() {
 
     private val graph by lazy { DigiApp.graph(this) }
 
+    /**
+     * Wake-ups for the loop, from the push channel or a network recovery.
+     *
+     * CONFLATED (capacity 1, dropping) on purpose: a burst of nudges is still one reason to re-sync,
+     * and a queue of them would make the loop spin through a backlog of work it has already done.
+     */
+    private val nudges = Channel<Unit>(capacity = Channel.CONFLATED)
+
+    /** Set by [nudge]; consumed by the loop. Waking the loop is not enough on its own — without
+     *  this it would wake, find the interval unexpired, and go straight back to sleep. */
+    @Volatile
+    private var beatNow = false
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -73,6 +89,12 @@ class PlayerService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (loopJob == null) {
+            // Wire the push channel to the loop before starting either, so a nudge that lands
+            // during start-up is not dropped on the floor.
+            graph.onPush = { reason -> nudge(reason) }
+            runCatching { graph.realtime.connect() }
+                .onFailure { AppLog.d(TAG, "Push channel unavailable; polling only", it) }
+
             loopJob = scope.launch { runLoop() }
             scope.launch { watchNetwork() }
         }
@@ -86,6 +108,8 @@ class PlayerService : Service() {
         // scope that is about to be cancelled, so it would usually never run. The CMS learns the
         // screen is gone from the heartbeat stopping, which is the signal it is designed around.
         AppLog.i(TAG, "Player service stopping")
+        graph.onPush = null
+        runCatching { graph.realtime.disconnect() }
         releaseWakeLock()
         state.value = state.value.copy(running = false)
         scope.cancel()
@@ -97,21 +121,52 @@ class PlayerService : Service() {
     private suspend fun runLoop() {
         startUp()
 
-        var sinceHeartbeat = Long.MAX_VALUE   // force a beat on the first pass
-        while (scope.isActive) {
-            val intervalMs = beatIntervalMs()
+        /*
+         * Timed against the CLOCK, not by counting ticks.
+         *
+         * This used to add TICK_MS to a counter once per pass and beat when it reached the
+         * interval — which silently excluded everything the cycle itself spent. A heartbeat that
+         * syncs and downloads can take a minute or two, and none of that counted, so the next beat
+         * landed sixty seconds after the previous one FINISHED rather than sixty seconds after it
+         * started. An operator unassigning a playlist during a download waited two or three minutes
+         * for the screen to notice, and the interval quietly stretched further the more work each
+         * cycle did.
+         *
+         * elapsedRealtime because it does not move when somebody corrects the device clock, and
+         * these boxes have their clocks corrected: wall-clock time can jump backwards mid-loop and
+         * strand the next beat indefinitely.
+         */
+        var lastBeatAt = 0L   // 0 forces a beat on the first pass
 
-            if (sinceHeartbeat >= intervalMs) {
-                sinceHeartbeat = 0
+        while (scope.isActive) {
+            val now = SystemClock.elapsedRealtime()
+            val forced = beatNow
+            if (forced || lastBeatAt == 0L || now - lastBeatAt >= beatIntervalMs()) {
+                beatNow = false
+                lastBeatAt = now
                 runCatching { heartbeatCycle() }
                     .onFailure { AppLog.e(TAG, "Heartbeat cycle failed", it) }
             }
 
             runCatching { tick() }.onFailure { AppLog.e(TAG, "Tick failed", it) }
 
-            delay(TICK_MS)
-            sinceHeartbeat += TICK_MS
+            // A push nudge short-circuits the wait, so a content change that arrives over the
+            // socket is acted on in the same second rather than at the next tick boundary.
+            withTimeoutOrNull(TICK_MS) { nudges.receive() }
         }
+    }
+
+    /**
+     * Ask the loop to beat now.
+     *
+     * Conflated rather than queued: ten nudges arriving together mean one re-sync, not ten. The
+     * channel is the wake-up, and [lastBeatAt] being reset is what makes the next pass actually
+     * beat rather than skip on the interval check.
+     */
+    private fun nudge(reason: String) {
+        AppLog.i(TAG, "Nudged: $reason")
+        beatNow = true
+        nudges.trySend(Unit)
     }
 
     /**
@@ -288,6 +343,38 @@ class PlayerService : Service() {
      */
     private fun applySettings(settings: SettingsDto?) {
         graph.settings.apply(settings)
+    }
+
+    /**
+     * React to the link coming back, rather than waiting out the rest of an interval.
+     *
+     * Ordered by what is most perishable. The buffered heartbeats go first: they decide what the
+     * CMS uptime grid says about the outage that has just ended, and they are the cheapest of the
+     * three. The socket is reconnected at the same moment because it almost certainly died with the
+     * link — its own backoff would get there eventually, but we already know the link is up.
+     */
+    private suspend fun watchNetwork() {
+        graph.network.online.drop(1).collect { online ->
+            if (online) {
+                AppLog.i(TAG, "Network restored — flushing queues")
+                graph.events.appEvent(AmsConstants.LogAction.NETWORK_RESTORED)
+
+                runCatching { graph.heartbeat.flushBuffered() }
+                    .onFailure { AppLog.w(TAG, "Heartbeat backfill failed", it) }
+                runCatching { graph.realtime.reconnect() }
+                    .onFailure { AppLog.d(TAG, "Push channel did not come back", it) }
+
+                flushQueues()
+                graph.content.reportInventory()
+
+                // Content may well have changed while this screen was unreachable, and the server
+                // cannot have told it. Beat now rather than at the next interval.
+                nudge("network restored")
+            } else {
+                AppLog.i(TAG, "Network lost — playback continues from cache")
+                graph.events.appEvent(AmsConstants.LogAction.NETWORK_LOST)
+            }
+        }
     }
 
     /* ── foreground plumbing ────────────────────────────────────────────────── */
