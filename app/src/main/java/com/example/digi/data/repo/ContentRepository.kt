@@ -194,6 +194,8 @@ class ContentRepository(
             cache.evictOrphans()
             return
         }
+        // Kept so DELETE_UNUSED_MEDIA can act on the server's answer rather than on a local guess.
+        store.retainCacheKeys = retain
         val removed = cache.retainOnly(retain)
         if (removed > 0) {
             events.appEvent(
@@ -341,10 +343,21 @@ class ContentRepository(
         return removed
     }
 
+    /**
+     * The operator's "reclaim space now" button.
+     *
+     * Acts on the server's retain list when there is one, which is the same authority the routine
+     * pass uses — so pressing this and waiting for the next sync produce the same disk, rather than
+     * two different opinions about what "unused" means.
+     *
+     * Falls back to the old local heuristic only when the server has never sent a list: an older
+     * backend, where "nothing has referenced this in a while" is the best answer available. Zero
+     * grace there, because this is an explicit instruction to reclaim space now rather than the
+     * routine pass that deliberately keeps recently-rotated content around.
+     */
     suspend fun deleteUnusedMedia(): Int {
-        // Zero grace: this is an explicit operator instruction to reclaim space now, not the
-        // routine eviction pass that deliberately keeps recently-rotated content around.
-        val removed = cache.evictOrphans(graceMillis = 0)
+        val retain = store.retainCacheKeys
+        val removed = if (retain != null) cache.retainOnly(retain) else cache.evictOrphans(graceMillis = 0)
         reportInventory()
         return removed
     }

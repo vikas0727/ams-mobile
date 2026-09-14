@@ -108,6 +108,20 @@ class PlayerStore(context: Context) {
         get() = prefs.getInt(KEY_APP_ROTATION, 0)
         set(value) = prefs.edit().putInt(KEY_APP_ROTATION, if (value in ROTATIONS) value else 0).apply()
 
+    /**
+     * The last retain list the server sent — every cache key this screen is entitled to hold.
+     *
+     * Persisted so the operator's DELETE_UNUSED_MEDIA button can act on the server's authority
+     * rather than on a local guess, without forcing a full re-sync first. Empty means the server has
+     * never sent one; an empty LIST that it did send is stored as a single blank entry so the two
+     * stay distinguishable — "hold nothing" is a real instruction and must not read as "no opinion".
+     */
+    var retainCacheKeys: List<String>?
+        get() = prefs.getStringSet(KEY_RETAIN, null)?.toList()
+        set(value) = prefs.edit().apply {
+            if (value == null) remove(KEY_RETAIN) else putStringSet(KEY_RETAIN, value.toSet())
+        }.apply()
+
     var heartbeatIntervalSeconds: Int
         get() = prefs.getInt(KEY_HEARTBEAT, com.example.digi.core.AmsConstants.DEFAULT_HEARTBEAT_SECONDS)
         set(value) = prefs.edit().putInt(KEY_HEARTBEAT, value.coerceIn(10, 3600)).apply()
@@ -187,6 +201,7 @@ class PlayerStore(context: Context) {
             .remove(KEY_ORIENTATION)
             .remove(KEY_MANIFEST)
             .remove(KEY_SETTINGS)
+            .remove(KEY_RETAIN)
             .remove(KEY_CONTENT_VERSION)
             .remove(KEY_REALTIME_CAPTURE)
             .apply()
@@ -209,6 +224,7 @@ class PlayerStore(context: Context) {
         const val KEY_MANIFEST = "manifest_json"
         const val KEY_SETTINGS = "settings_json"
         const val KEY_APP_ROTATION = "app_rotation_degrees"
+        const val KEY_RETAIN = "retain_cache_keys"
         private val ROTATIONS = setOf(0, 90, 180, 270)
     }
 }
