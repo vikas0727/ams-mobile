@@ -159,7 +159,16 @@ class PlanBuilder(private val cache: MediaCache) {
             // two zones playing over each other is the failure this prevents.
             muted = (slide.muted ?: AmsConstants.INACTIVE) == AmsConstants.ACTIVE ||
                 (zone.muted ?: AmsConstants.INACTIVE) == AmsConstants.ACTIVE,
-            fitMode = slide.fitMode ?: "contain",
+            // Unset means FILL, not letterbox.
+            //
+            // A signage panel is bought to be covered. The old default of "contain" letterboxed a
+            // 1920x1080 asset on a 2340x1080 panel — black bars down both sides on hardware somebody paid
+            // for — and because the preview faithfully mirrored it, both agreed on the wrong answer.
+            //
+            // Filling crops: on that panel about 18% of the asset's height goes. That is the trade signage
+            // makes, and it is the one every comparable product makes by default. An asset that must not be
+            // cropped sets its own fitMode in the playlist editor, and an explicit value still wins here.
+            fitMode = slide.fitMode ?: "cover",
             fromSequenceId = slide.fromSequence?.id,
         )
     }
