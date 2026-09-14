@@ -4,7 +4,9 @@ import android.content.Context
 import com.example.digi.core.AmsConstants
 import com.example.digi.core.AppLog
 import com.example.digi.core.PlayerHost
+import com.example.digi.core.ServerClock
 import com.example.digi.data.local.PlayerStore
+import com.example.digi.data.remote.dto.AppliedSettingsDto
 import com.example.digi.data.remote.dto.SettingsDto
 
 /**
@@ -57,6 +59,14 @@ class SettingsApplier(
             }
     }
 
+    /** The last pass's outcome, so the heartbeat can report what this device could not honour
+     *  without re-running the whole thing. */
+    @Volatile
+    private var lastResult: Result = Result()
+
+    @Volatile
+    private var lastAppliedAtMs: Long = 0
+
     private var lastVolume: Int? = null
     private var lastBrightness: Int? = null
     private var lastAppRotation: String? = null
@@ -81,8 +91,33 @@ class SettingsApplier(
         if (applied.isNotEmpty()) AppLog.i(TAG, "Settings: ${applied.joinToString(", ")}")
         if (skipped.isNotEmpty()) AppLog.i(TAG, "Settings not supported here: ${skipped.joinToString(", ")}")
 
-        return Result(applied, skipped)
+        val result = Result(applied, skipped)
+        lastResult = result
+        lastAppliedAtMs = ServerClock.now()
+        return result
     }
+
+    /**
+     * What this device is ACTUALLY running, for the heartbeat to report back.
+     *
+     * Read back rather than echoed wherever the platform allows it. Volume comes from the audio
+     * manager, not from the last value written: a box's steps are coarse, so 45% becomes 43.75%, and
+     * a site engineer with a remote can move it afterwards. Reporting the requested figure would
+     * make the portal agree with itself and disagree with the wall, which is the failure this whole
+     * readback exists to end.
+     *
+     * Brightness has no reliable read-back — the system value is a 0-255 scale that some boards do
+     * not honour and others clamp — so the last applied value is reported and is honest about being
+     * that. Rotation is read from the store, which is what the renderer actually uses.
+     */
+    fun effective(): AppliedSettingsDto = AppliedSettingsDto(
+        volume = DeviceController.currentVolumePercent(context) ?: lastVolume,
+        brightness = lastBrightness,
+        appRotation = store.appRotationDegrees,
+        panelRotation = lastPanelRotation?.toRotationDegrees(),
+        unsupported = lastResult.skipped,
+        appliedAt = if (lastAppliedAtMs > 0) ServerClock.isoUtc(lastAppliedAtMs) else null,
+    )
 
     private fun applyVolume(settings: SettingsDto, force: Boolean, applied: MutableList<String>) {
         val volume = settings.volume ?: return

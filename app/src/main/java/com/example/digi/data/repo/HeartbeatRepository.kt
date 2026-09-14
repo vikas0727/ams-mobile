@@ -9,6 +9,7 @@ import com.example.digi.data.local.entity.PendingHeartbeatEntity
 import com.example.digi.data.remote.ApiResult
 import com.example.digi.data.remote.PlayerApi
 import com.example.digi.data.remote.apiCall
+import com.example.digi.data.remote.dto.AppliedSettingsDto
 import com.example.digi.data.remote.dto.HeartbeatBackfillRequest
 import com.example.digi.data.remote.dto.HeartbeatRequest
 import com.example.digi.data.remote.dto.SettingsDto
@@ -48,6 +49,9 @@ class HeartbeatRepository(
     private val store: PlayerStore,
     private val telemetry: TelemetryCollector,
     private val pendingBeats: PendingHeartbeatDao,
+    /** Supplies what the device actually has in force, so the CMS can show the truth rather than
+     *  its own intentions. Null on builds that have no applier wired yet. */
+    private val effectiveSettings: (() -> AppliedSettingsDto?)? = null,
 ) {
 
     data class Beat(
@@ -80,6 +84,10 @@ class HeartbeatRepository(
             contentVersion = store.contentVersion,
             currentlyPlaying = currentlyPlaying,
             telemetry = telemetry.collect(),
+            // Rides on the beat rather than getting its own call: it is a handful of integers, the
+            // beat already runs every minute, and a separate endpoint would be one more thing to be
+            // offline for.
+            appliedSettings = runCatching { effectiveSettings?.invoke() }.getOrNull(),
         )
 
         return when (val result = apiCall { api.heartbeat(request) }) {

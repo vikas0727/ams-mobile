@@ -84,7 +84,13 @@ class DigiApp : Application() {
         val content: ContentRepository by lazy { ContentRepository(api, store, mediaCache, events) }
 
         val heartbeat: HeartbeatRepository by lazy {
-            HeartbeatRepository(api, store, telemetry, database.pendingHeartbeatDao())
+            HeartbeatRepository(
+                api = api,
+                store = store,
+                telemetry = telemetry,
+                pendingBeats = database.pendingHeartbeatDao(),
+                effectiveSettings = { settings.effective() },
+            )
         }
 
 

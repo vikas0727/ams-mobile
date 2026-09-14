@@ -18,6 +18,37 @@ data class HeartbeatRequest(
     val contentVersion: Int? = null,
     val currentlyPlaying: String? = null,
     val telemetry: TelemetryDto? = null,
+    /** What this device actually has in force — see [AppliedSettingsDto]. */
+    val appliedSettings: AppliedSettingsDto? = null,
+)
+
+/**
+ * The settings this device is actually running, as opposed to the ones the CMS asked for.
+ *
+ * Without this the portal can only ever show its own intentions. It stores what an operator typed,
+ * marks the command acked, and displays the typed value back to them — which is exactly the loop
+ * that let a player accept settings and apply none of them without anybody noticing.
+ *
+ * So the values here are READ BACK where reading back is possible rather than echoed. `volume` in
+ * particular comes from the audio manager, not from what was last written to it, because a TV
+ * box's volume steps are coarse — asking for 45% on a device with sixteen steps gets you 43.75% —
+ * and a site engineer with a remote can move it afterwards. An operator looking at 45 in the portal
+ * and 44 on the device is looking at the truth; an operator looking at 45 in both when the panel is
+ * at 80 is being misled.
+ *
+ * [unsupported] is the other half. A device that cannot honour a setting says so here, so the
+ * portal can show a switch as ineffective on this hardware rather than as on.
+ */
+@Serializable
+data class AppliedSettingsDto(
+    val volume: Int? = null,
+    val brightness: Int? = null,
+    val appRotation: Int? = null,
+    val panelRotation: Int? = null,
+    /** Human-readable reasons, e.g. "kiosk mode (needs device-owner provisioning)". */
+    val unsupported: List<String> = emptyList(),
+    /** ISO-8601 UTC — when this device last ran a settings pass. */
+    val appliedAt: String? = null,
 )
 
 @Serializable
