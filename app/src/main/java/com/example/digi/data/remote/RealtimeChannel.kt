@@ -97,10 +97,15 @@ class RealtimeChannel(
 
             socket = client
             client.connect()
-        }.onFailure {
+        }.onFailure { error ->
             // Includes the case where the library is missing entirely from a build. The player is
             // fully functional without it.
-            AppLog.d(TAG, "Push channel could not start; polling only", it)
+            //
+            // AppLog.d takes (tag, message) only — the throwable overload is on w() and e(). This
+            // stays at debug deliberately (see the class doc: a blocked socket changes nothing about
+            // how the player behaves), so the cause is folded into the message rather than promoted
+            // to a warning just to have somewhere to put it.
+            AppLog.d(TAG, "Push channel could not start; polling only: $error")
             socket = null
         }
     }
