@@ -13,6 +13,7 @@ import com.example.digi.data.repo.CommandRepository
 import com.example.digi.data.repo.ContentRepository
 import com.example.digi.data.repo.EventReporter
 import com.example.digi.data.repo.HeartbeatRepository
+import com.example.digi.data.repo.LiveFrameReporter
 import com.example.digi.data.repo.PairingRepository
 import com.example.digi.data.repo.ProofOfPlayRecorder
 import com.example.digi.device.DeviceInfoCollector
@@ -84,6 +85,12 @@ class DigiApp : Application() {
          *  rather than crashing on a loop that does not exist yet. */
         @Volatile
         var onPush: ((String) -> Unit)? = null
+
+        /**
+         * The Live Data View stream — a downscaled JPEG of the panel every few seconds, but only
+         * while an operator actually has the preview open.
+         */
+        val liveFrames: LiveFrameReporter by lazy { LiveFrameReporter(api, store) }
 
         val deviceInfo: DeviceInfoCollector by lazy { DeviceInfoCollector(app, network) }
 

@@ -93,10 +93,11 @@ class PlayerService : Service() {
             // during start-up is not dropped on the floor.
             graph.onPush = { reason -> nudge(reason) }
             runCatching { graph.realtime.connect() }
-                .onFailure { AppLog.d(TAG, "Push channel unavailable; polling only", it) }
+                .onFailure { AppLog.d(TAG, "Push channel unavailable; polling only: $it") }
 
             loopJob = scope.launch { runLoop() }
             scope.launch { watchNetwork() }
+            scope.launch { streamLiveFrames() }
         }
         // STICKY so that a system kill under memory pressure brings the loop back by itself. There
         // is nobody standing at the box to restart it.
@@ -362,7 +363,7 @@ class PlayerService : Service() {
                 runCatching { graph.heartbeat.flushBuffered() }
                     .onFailure { AppLog.w(TAG, "Heartbeat backfill failed", it) }
                 runCatching { graph.realtime.reconnect() }
-                    .onFailure { AppLog.d(TAG, "Push channel did not come back", it) }
+                    .onFailure { AppLog.d(TAG, "Push channel did not come back: $it") }
 
                 flushQueues()
                 graph.content.reportInventory()
@@ -374,6 +375,33 @@ class PlayerService : Service() {
                 AppLog.i(TAG, "Network lost — playback continues from cache")
                 graph.events.appEvent(AmsConstants.LogAction.NETWORK_LOST)
             }
+        }
+    }
+
+    /**
+     * The Live Data View stream.
+     *
+     * Its own loop rather than a step inside the tick, because it runs at a different cadence for a
+     * different reason: an operator watching a preview wants a fresh picture every few seconds,
+     * while the tick exists to catch schedule boundaries. Folding the two together would either
+     * make the preview sluggish or make the tick expensive.
+     *
+     * Costs nothing when nobody is watching. [LiveFrameReporter.pushFrame] returns false the moment
+     * the flag is off or the server says the panel has been closed, and this drops back to polling
+     * that flag once a second — which is a boolean read, not a request.
+     */
+    private suspend fun streamLiveFrames() {
+        while (scope.isActive) {
+            if (!graph.store.realtimeCaptureEnabled) {
+                delay(IDLE_FRAME_CHECK_MS)
+                continue
+            }
+
+            val keepGoing = runCatching { graph.liveFrames.pushFrame() }
+                .onFailure { AppLog.d(TAG, "Live frame skipped: $it") }
+                .getOrDefault(true)
+
+            delay(if (keepGoing) LIVE_FRAME_MS else IDLE_FRAME_CHECK_MS)
         }
     }
 
@@ -472,6 +500,15 @@ class PlayerService : Service() {
 
         /** Heartbeat cadence while a screen has no content — see [beatIntervalMs]. */
         private const val IDLE_BEAT_MS = 15_000L
+
+        /** How often a watched screen pushes a preview frame. Matches the server's
+         *  LIVE_FRAME_INTERVAL_SECONDS, and the CMS polls at the same rate. */
+        private const val LIVE_FRAME_MS = 5_000L
+
+        /** How often to re-check the capture flag while nobody is watching. A boolean read from
+         *  SharedPreferences, so this is free — it exists only so switching the panel on is noticed
+         *  within a second rather than at the next heartbeat. */
+        private const val IDLE_FRAME_CHECK_MS = 1_000L
 
         private val state = MutableStateFlow(ServiceState())
         val serviceState: StateFlow<ServiceState> = state.asStateFlow()
