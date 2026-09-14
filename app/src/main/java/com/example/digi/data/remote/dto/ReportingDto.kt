@@ -124,21 +124,3 @@ data class ScreenshotResponse(
     val key: String? = null,
     val capturedAt: String? = null,
 )
-
-/* ------------------------------------------------------------------ *
- * Live Data View frame — POST /player/live-frame (multipart, not encrypted)
- * ------------------------------------------------------------------ */
-
-/**
- * The server's answer to a pushed frame.
- *
- * [captureEnabled] is the authority on whether to keep streaming: the player asks for nothing and
- * is simply told, on every frame, whether anyone is still watching. That is what stops a device
- * that missed a STOP command from pushing frames at a panel nobody has open.
- */
-@Serializable
-data class LiveFrameResponse(
-    val captureEnabled: Boolean = false,
-    val intervalSeconds: Int? = null,
-    val capturedAt: String? = null,
-)

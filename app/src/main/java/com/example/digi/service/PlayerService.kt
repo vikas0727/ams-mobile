@@ -10,7 +10,6 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
-import android.os.SystemClock
 import com.example.digi.R
 import com.example.digi.core.AmsConstants
 import com.example.digi.core.AppLog
@@ -76,7 +75,6 @@ class PlayerService : Service() {
         if (loopJob == null) {
             loopJob = scope.launch { runLoop() }
             scope.launch { watchNetwork() }
-            scope.launch { streamLiveFrames() }
         }
         // STICKY so that a system kill under memory pressure brings the loop back by itself. There
         // is nobody standing at the box to restart it.
@@ -340,81 +338,6 @@ class PlayerService : Service() {
         }
     }
 
-    /**
-     * The Live Data View stream.
-     *
-     * Its own loop rather than a step inside the tick, because it runs at a different cadence for a
-     * different reason: the tick is local housekeeping every ten seconds, while this is a network
-     * push every five — and only during the minutes an operator has the panel open. Folding it into
-     * the tick would either slow the stream to a slideshow or triple the rate of everything else.
-     *
-     * Costs nothing at all when nobody is watching: the flag is a preference read, and the loop
-     * does not touch the screen or the network until it is set.
-     *
-     * There is a floor of about one heartbeat on how quickly the stream STARTS, because that is
-     * when the player learns the toggle was flipped. Stopping is immediate — the server tells it so
-     * on the next frame.
-     */
-    private suspend fun streamLiveFrames() {
-        var interval = LIVE_FRAME_MS
-        var slowStreak = 0
-
-        while (scope.isActive) {
-            val watching = graph.store.realtimeCaptureEnabled && !graph.store.playerToken.isNullOrBlank()
-            // A blanked panel is black: capturing it costs a full readback to photograph nothing,
-            // and the operator can see the screen is off from the schedule anyway.
-            val worthCapturing = watching && state.value.displayOn
-
-            if (!worthCapturing) {
-                interval = LIVE_FRAME_MS
-                slowStreak = 0
-                delay(LIVE_FRAME_MS)
-                continue
-            }
-
-            val started = SystemClock.elapsedRealtime()
-            runCatching { graph.liveFrames.pushFrame() }
-                .onFailure { AppLog.w(TAG, "Live frame push failed", it) }
-            val elapsed = SystemClock.elapsedRealtime() - started
-
-            /*
-             * Pace against the clock, not against the last frame.
-             *
-             * The old loop did the work and *then* waited a fixed five seconds, so the real cadence
-             * was five seconds plus however long the capture and upload took. On a box where that
-             * came to three or four seconds the preview updated every eight or nine — which is what
-             * the CMS was reporting as a stalled stream, correctly.
-             *
-             * Two rules keep it honest without letting it eat the device:
-             *
-             *  - Subtract the work from the wait, so the cadence is the interval.
-             *  - Never rest for less time than the capture took. That caps this loop at half the
-             *    device's time no matter how slow it is, which is the difference between a preview
-             *    that lags and a wall that stutters. Playback wins.
-             */
-            if (elapsed > interval) {
-                slowStreak++
-                if (slowStreak >= SLOW_FRAMES_BEFORE_BACKOFF) {
-                    interval = (interval * 2).coerceAtMost(MAX_LIVE_FRAME_MS)
-                    slowStreak = 0
-                    AppLog.i(
-                        TAG,
-                        "Live frames are taking ${elapsed}ms on this device — backing the stream off to ${interval}ms"
-                    )
-                }
-            } else {
-                slowStreak = 0
-                // Recover once the device proves it can keep up with room to spare, so a single
-                // slow patch does not leave the preview at a crawl for the rest of the session.
-                if (interval > LIVE_FRAME_MS && elapsed * 3 < interval) {
-                    interval = (interval / 2).coerceAtLeast(LIVE_FRAME_MS)
-                }
-            }
-
-            delay(maxOf(interval - elapsed, elapsed))
-        }
-    }
-
     /* ── foreground plumbing ────────────────────────────────────────────────── */
 
     private fun createChannel() {
@@ -510,17 +433,6 @@ class PlayerService : Service() {
 
         /** Heartbeat cadence while a screen has no content — see [beatIntervalMs]. */
         private const val IDLE_BEAT_MS = 15_000L
-
-        /** Live Data View frame cadence, matching the backend's LIVE_FRAME_INTERVAL_SECONDS. */
-        private const val LIVE_FRAME_MS = 5_000L
-
-        /** The slowest the live stream will run before it simply stops trying to look live. Beyond
-         *  this the preview is not useful anyway, and the operator has bigger problems. */
-        private const val MAX_LIVE_FRAME_MS = 30_000L
-
-        /** One slow frame is a hiccup — a codec keyframe, a GC, a retried upload. Three in a row is
-         *  the device telling us it cannot sustain this cadence. */
-        private const val SLOW_FRAMES_BEFORE_BACKOFF = 3
 
         private val state = MutableStateFlow(ServiceState())
         val serviceState: StateFlow<ServiceState> = state.asStateFlow()

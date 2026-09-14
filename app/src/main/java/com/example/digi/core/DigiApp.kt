@@ -12,7 +12,6 @@ import com.example.digi.data.repo.CommandRepository
 import com.example.digi.data.repo.ContentRepository
 import com.example.digi.data.repo.EventReporter
 import com.example.digi.data.repo.HeartbeatRepository
-import com.example.digi.data.repo.LiveFrameReporter
 import com.example.digi.data.repo.PairingRepository
 import com.example.digi.data.repo.ProofOfPlayRecorder
 import com.example.digi.device.DeviceInfoCollector
@@ -83,7 +82,6 @@ class DigiApp : Application() {
             HeartbeatRepository(api, store, telemetry, database.pendingHeartbeatDao())
         }
 
-        val liveFrames: LiveFrameReporter by lazy { LiveFrameReporter(api, store) }
 
         val commands: CommandRepository by lazy { CommandRepository(api, database.pendingCommandDao()) }
 

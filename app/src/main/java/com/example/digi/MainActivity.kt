@@ -1,7 +1,6 @@
 package com.example.digi
 
 import android.graphics.Bitmap
-import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -37,10 +36,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 
@@ -56,11 +52,6 @@ class MainActivity : ComponentActivity(), PlayerHost {
 
     private var playerViewModel: PlayerViewModel? = null
     private var captureThread: HandlerThread? = null
-
-    /** Reused across live frames — see [captureFrame]. Guarded by [captureMutex]. */
-    private var frameBitmap: Bitmap? = null
-    private var frameBuffer: ByteArrayOutputStream? = null
-    private val captureMutex = Mutex()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -141,9 +132,6 @@ class MainActivity : ComponentActivity(), PlayerHost {
     override fun onDestroy() {
         captureThread?.quitSafely()
         captureThread = null
-        frameBitmap?.recycle()
-        frameBitmap = null
-        frameBuffer = null
         super.onDestroy()
     }
 
@@ -189,79 +177,6 @@ class MainActivity : ComponentActivity(), PlayerHost {
     }
 
     /* ── PlayerHost ─────────────────────────────────────────────────────────── */
-
-    /**
-     * A Live Data View frame, captured cheaply enough to run every few seconds without the wall
-     * noticing.
-     *
-     * Three costs the old path paid per frame, all removed here:
-     *
-     *  - **A panel-sized bitmap.** `PixelCopy.request` has an overload taking a source [Rect]; when
-     *    the destination is smaller, the system scales during the copy. So the destination is the
-     *    ~640px frame we actually want (about 0.7MB) instead of the full 2340x1080 surface (10MB),
-     *    and there is no second bitmap to scale into afterwards.
-     *  - **A new allocation every time.** The destination is kept and reused; only a resolution
-     *    change reallocates it. A 10MB allocation every five seconds is what was triggering the GC
-     *    pauses that showed up as stutter.
-     *  - **A round trip through the disk.** The JPEG went to `cacheDir` for the uploader to read
-     *    back and delete. It now stays in a reused buffer.
-     *
-     * The capture mutex matters: the reused bitmap and stream are shared state, and two overlapping
-     * captures would hand the uploader a half-written frame.
-     */
-    override suspend fun captureFrame(targetWidthPx: Int, jpegQuality: Int): ByteArray? =
-        captureMutex.withLock {
-            val source = withContext(Dispatchers.Main) {
-                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-                    AppLog.w(TAG, "Screen capture needs API 26+; this box is ${Build.VERSION.SDK_INT}")
-                    return@withContext null
-                }
-                val view = window.decorView
-                if (view.width <= 0 || view.height <= 0) return@withContext null
-
-                // coerceAtMost then coerceAtLeast, never coerceIn: on a window narrower than the
-                // target (a split-screen or a resized emulator) coerceIn would be handed a floor
-                // above its ceiling and throw.
-                val width = targetWidthPx.coerceAtMost(view.width).coerceAtLeast(1)
-                val height = (view.height.toLong() * width / view.width).toInt().coerceAtLeast(1)
-
-                val dest = frameBitmap?.takeIf { !it.isRecycled && it.width == width && it.height == height }
-                    ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                        .also {
-                            frameBitmap?.recycle()
-                            frameBitmap = it
-                        }
-
-                val thread = captureThread ?: HandlerThread("digi-capture").also {
-                    it.start()
-                    captureThread = it
-                }
-
-                val copied = CompletableDeferred<Boolean>()
-                PixelCopy.request(
-                    window,
-                    Rect(0, 0, view.width, view.height),
-                    dest,
-                    { status -> copied.complete(status == PixelCopy.SUCCESS) },
-                    Handler(thread.looper),
-                )
-                if (copied.await()) dest else null
-            } ?: return@withLock null
-
-            // Encoding needs no window, and a JPEG encode is long enough on a cheap SoC to drop a
-            // frame if it runs on the main thread.
-            withContext(Dispatchers.IO) {
-                runCatching {
-                    val out = frameBuffer ?: ByteArrayOutputStream(64 * 1024).also { frameBuffer = it }
-                    out.reset()
-                    source.compress(Bitmap.CompressFormat.JPEG, jpegQuality.coerceIn(1, 100), out)
-                    out.toByteArray()
-                }.getOrElse {
-                    AppLog.w(TAG, "Live frame encode failed", it)
-                    null
-                }
-            }
-        }
 
     /**
      * PixelCopy rather than `View.getDrawingCache()`.
