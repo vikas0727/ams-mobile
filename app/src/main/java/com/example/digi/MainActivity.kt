@@ -75,6 +75,7 @@ class MainActivity : ComponentActivity(), PlayerHost {
 
     private var playerViewModel: PlayerViewModel? = null
     private var captureThread: HandlerThread? = null
+    private var frameBitmap: Bitmap? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -192,6 +193,8 @@ class MainActivity : ComponentActivity(), PlayerHost {
     override fun onDestroy() {
         captureThread?.quitSafely()
         captureThread = null
+        frameBitmap?.recycle()
+        frameBitmap = null
         super.onDestroy()
     }
 
@@ -261,9 +264,34 @@ class MainActivity : ComponentActivity(), PlayerHost {
         }
 
         val view = window.decorView
-        if (view.width <= 0 || view.height <= 0) return@withContext null
+        val sourceWidth = view.width
+        val sourceHeight = view.height
+        if (sourceWidth <= 0 || sourceHeight <= 0) return@withContext null
 
-        val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
+        /*
+         * Ask PixelCopy for the size actually wanted, rather than copying the whole panel and
+         * shrinking it afterwards.
+         *
+         * PixelCopy scales the source surface into whatever bitmap it is handed, so a 640px live
+         * frame costs one GPU blit into ~0.7MB instead of a full-resolution ARGB_8888 copy — 10MB
+         * on a 2340x1080 panel — followed by a CPU rescale of the same. At one frame every five
+         * seconds the old path meant a 10MB allocation, a large-object GC and a software resize on
+         * a repeating cycle, which on a 2GB box is visible as a hitch in the video every time.
+         *
+         * The operator-requested screenshot passes no width and still gets the full panel.
+         */
+        val targetWidth = if (maxWidthPx != null && maxWidthPx in 1 until sourceWidth) maxWidthPx else sourceWidth
+        val targetHeight = (sourceHeight.toLong() * targetWidth / sourceWidth).toInt().coerceAtLeast(1)
+
+        val jpeg = jpegQuality != null
+        // Live frames are a fixed size on a repeating cycle, so the one bitmap is reused rather than
+        // reallocated every five seconds. Captures are serialised by the single service loop, so
+        // there is no second caller to race with. A full-size screenshot is rare and one-off, and is
+        // not worth keeping a 10MB buffer alive for.
+        val reusable = jpeg && targetWidth < sourceWidth
+        val bitmap = if (reusable) obtainFrameBitmap(targetWidth, targetHeight)
+        else Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+
         // A dedicated thread for the copy callback: PixelCopy must not deliver onto the main
         // looper it is about to block reading the surface from.
         val thread = captureThread ?: HandlerThread("digi-capture").also {
@@ -273,22 +301,21 @@ class MainActivity : ComponentActivity(), PlayerHost {
 
         val copied = CompletableDeferred<Boolean>()
         try {
-            PixelCopy.request(window, bitmap, { status ->
+            // srcRect null = the whole window, scaled into `bitmap`.
+            PixelCopy.request(window, null, bitmap, { status ->
                 copied.complete(status == PixelCopy.SUCCESS)
             }, Handler(thread.looper))
 
             if (!copied.await()) {
                 AppLog.w(TAG, "PixelCopy failed")
-                bitmap.recycle()
+                if (!reusable) bitmap.recycle()
                 return@withContext null
             }
 
-            // Scaling and compression are the slow parts and need no window, so they go back off
-            // the main thread — a 1080p encode on a cheap SoC is comfortably long enough to drop
-            // frames, and at one live frame every five seconds that would be visible on the wall.
+            // Compression is the slow part and needs no window, so it goes off the main thread — an
+            // encode on a cheap SoC is comfortably long enough to drop frames, and at one live frame
+            // every five seconds that would be visible on the wall.
             withContext(Dispatchers.IO) {
-                val scaled = scaleDown(bitmap, maxWidthPx)
-                val jpeg = jpegQuality != null
                 val file = File(
                     cacheDir,
                     "${if (jpeg) "frame" else "screenshot"}-${System.currentTimeMillis()}" +
@@ -296,23 +323,35 @@ class MainActivity : ComponentActivity(), PlayerHost {
                 )
                 FileOutputStream(file).use { out ->
                     if (jpeg) {
-                        scaled.compress(Bitmap.CompressFormat.JPEG, jpegQuality.coerceIn(1, 100), out)
+                        bitmap.compress(Bitmap.CompressFormat.JPEG, jpegQuality.coerceIn(1, 100), out)
                     } else {
                         // PNG for an operator-requested screenshot: it goes in the history and may
                         // be read closely, and a re-encoded JPEG of a text-heavy signage layout is
                         // harder to read than the extra megabyte is to send.
-                        scaled.compress(Bitmap.CompressFormat.PNG, 100, out)
+                        bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
                     }
                 }
-                if (scaled !== bitmap) scaled.recycle()
-                bitmap.recycle()
+                if (!reusable) bitmap.recycle()
                 file
             }
         } catch (e: Throwable) {
             AppLog.e(TAG, "Screen capture failed", e)
-            runCatching { bitmap.recycle() }
+            if (!reusable) runCatching { bitmap.recycle() }
             null
         }
+    }
+
+    /**
+     * The reusable live-frame buffer, reallocated only when the requested size changes — which
+     * happens once, on the first frame after the panel's resolution is known.
+     */
+    private fun obtainFrameBitmap(width: Int, height: Int): Bitmap {
+        val existing = frameBitmap
+        if (existing != null && !existing.isRecycled && existing.width == width && existing.height == height) {
+            return existing
+        }
+        existing?.recycle()
+        return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { frameBitmap = it }
     }
 
     /**
@@ -329,21 +368,6 @@ class MainActivity : ComponentActivity(), PlayerHost {
     }
 
     override fun currentlyPlaying(): String? = playerViewModel?.currentlyPlaying()
-
-    /**
-     * Shrink to [maxWidthPx] wide, keeping aspect. Returns the original when it is already small
-     * enough or no limit was given, so the caller must compare identities before recycling.
-     */
-    private fun scaleDown(bitmap: Bitmap, maxWidthPx: Int?): Bitmap {
-        if (maxWidthPx == null || maxWidthPx <= 0 || bitmap.width <= maxWidthPx) return bitmap
-        val height = (bitmap.height.toLong() * maxWidthPx / bitmap.width).toInt().coerceAtLeast(1)
-        return runCatching {
-            Bitmap.createScaledBitmap(bitmap, maxWidthPx, height, true)
-        }.getOrElse {
-            AppLog.w(TAG, "Could not scale capture, sending full size", it)
-            bitmap
-        }
-    }
 
     private companion object {
         const val TAG = "MainActivity"

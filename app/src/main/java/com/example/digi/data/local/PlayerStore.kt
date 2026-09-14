@@ -154,7 +154,22 @@ class PlayerStore(context: Context) {
      */
     var realtimeCaptureEnabled: Boolean
         get() = prefs.getBoolean(KEY_REALTIME_CAPTURE, false)
-        set(value) = prefs.edit().putBoolean(KEY_REALTIME_CAPTURE, value).apply()
+        set(value) {
+            prefs.edit().putBoolean(KEY_REALTIME_CAPTURE, value).apply()
+            _realtimeCapture.value = value
+        }
+
+    /**
+     * The same flag, observable.
+     *
+     * The video layer needs this, not just the reporters: a zone can only be photographed when it
+     * renders through a TextureView, and a TextureView costs a GPU copy of every video frame. So
+     * the player uses a SurfaceView normally and swaps to a TextureView only while somebody is
+     * actually watching — which means the UI has to be told the moment the flag moves rather than
+     * on its next recomposition, whenever that happens to be.
+     */
+    private val _realtimeCapture = MutableStateFlow(prefs.getBoolean(KEY_REALTIME_CAPTURE, false))
+    val realtimeCapture: StateFlow<Boolean> get() = _realtimeCapture.asStateFlow()
 
     /* ── cached manifest & settings ──────────────────────────────────────── */
 
@@ -206,6 +221,9 @@ class PlayerStore(context: Context) {
             .remove(KEY_REALTIME_CAPTURE)
             .apply()
         _paired.value = false
+        // Mirrors the pref removal above. Left set, the video layer would keep rendering through a
+        // TextureView for a screen nobody is watching any more.
+        _realtimeCapture.value = false
     }
 
     private companion object {

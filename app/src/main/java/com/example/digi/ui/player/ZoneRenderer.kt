@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -23,11 +25,13 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.digi.R
 import com.example.digi.core.AmsConstants
 import com.example.digi.core.AppLog
+import com.example.digi.core.DigiApp
 import com.example.digi.player.PlanSlide
 import com.example.digi.player.PlaybackEngine
 import java.io.File
@@ -61,9 +65,13 @@ import kotlin.math.abs
  * the common case precisely because that is the path ExoPlayer has already prepared for.
  *
  * The video surface is created once and never torn down. When an image slide is up the surface is
- * alpha-hidden rather than removed, so returning to video does not pay for a new surface. This is
- * also why the zone uses a TextureView rather than a SurfaceView — a SurfaceView cannot be
- * alpha-composited, quite apart from making remote screenshots come back black.
+ * alpha-hidden rather than removed, so returning to video does not pay for a new surface.
+ *
+ * Whether that surface is a SurfaceView or a TextureView is decided per zone and can change at
+ * runtime: a TextureView is needed to alpha-hide video behind an image and to let PixelCopy see the
+ * video at all, but it routes every decoded frame through the app's GPU pipeline and that is enough
+ * to make 1080p judder on a 2GB box. A zone that is pure video on a screen nobody is watching gets
+ * the SurfaceView. See the `needsTextureView` block below.
  *
  * `pauseAtEndOfMediaItems` is what holds the last frame when a clip is shorter than the slot the
  * operator gave it. That used to be a black rectangle for the remainder of the slot, which was
@@ -259,41 +267,80 @@ private fun VideoLayer(
 
     val fitMode = slides.getOrNull(slideIndex)?.fitMode ?: videoSlides.first().fitMode
 
-    AndroidView(
-        factory = { ctx ->
-            // Inflated rather than constructed, purely to get surface_type="texture_view" — see the
-            // comment in that layout. A SurfaceView is composited outside the app window, so remote
-            // screenshots of a playing screen come back black, and it cannot be alpha-hidden the
-            // way this layer needs.
-            val view = LayoutInflater.from(ctx)
-                .inflate(R.layout.zone_player_view, null) as PlayerView
-            view.apply {
-                useController = false
-                // Transparent background: zones overlap by design (a ticker over video is the most
-                // common signage layout) and an opaque surface would black out whatever is beneath.
-                setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
-                // Hold the last rendered frame instead of blanking whenever the player is reset or
-                // its item changes. Without this the view clears itself to nothing at exactly the
-                // moment we are trying to bridge.
-                setKeepContentOnPlayerReset(true)
-                layoutParams = ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                )
-                this.player = player
-            }
-        },
-        update = { view ->
-            // Deliberately does NOT reassign the player. Handing a PlayerView a player detaches the
-            // old surface and attaches a new one; doing that on every recomposition is a black
-            // flash several times a second.
-            view.resizeMode = fitMode.toResizeMode()
-        },
-        modifier = Modifier
-            .fillMaxSize()
-            // Hidden, not removed, while an image is up — the surface and its decoder survive.
-            .alpha(if (targetItem != null) 1f else 0f),
-    )
+    /* ── which surface this zone renders through ────────────────────────────
+     *
+     * A SurfaceView hands the decoded frames straight to the display hardware and costs the app
+     * nothing per frame. A TextureView routes every frame through the app's GPU pipeline, which is
+     * what makes the video capturable and alpha-composable — and what makes 1080p judder on a 2GB
+     * box. This layer used to be TextureView unconditionally, so every screen in the fleet paid
+     * that permanently for a screenshot feature nobody was using most of the time.
+     *
+     * Two things genuinely need the TextureView, and nothing else does:
+     *
+     *  1. Somebody is watching. Live Data View and the SCREENSHOT command both read the window with
+     *     PixelCopy, and a SurfaceView is not in the window — the capture comes back black.
+     *  2. The zone mixes images with video. The video layer is hidden behind an image by fading its
+     *     alpha to zero, and a SurfaceView ignores alpha: the video would carry on showing through
+     *     an image slide, and through the Crossfade between them.
+     *
+     * Neither is true for the ordinary case — a zone playing a video loop on an unwatched screen —
+     * so that case gets the fast path.
+     */
+    val captureEnabled by DigiApp.graph(context).store.realtimeCapture.collectAsStateWithLifecycle()
+    val mixesImages = remember(slides) { slides.any { !it.isVideo && it.isPlayable } }
+    val needsTextureView = captureEnabled || mixesImages
+
+    // `key` rather than a branch inside the factory: surface_type is read at inflation and cannot be
+    // changed afterwards, so flipping it means building a new PlayerView. The ExoPlayer itself is
+    // remembered on zoneKey and survives, so the swap is a surface re-attach — a single frame's
+    // blink when an operator opens or closes Live Data View, which is the only time it happens.
+    key(needsTextureView) {
+        AndroidView(
+            factory = { ctx ->
+                // Inflated rather than constructed, purely to get at surface_type — see the
+                // comments in those two layouts.
+                val layout = if (needsTextureView) {
+                    R.layout.zone_player_view_capture
+                } else {
+                    R.layout.zone_player_view
+                }
+                val view = LayoutInflater.from(ctx).inflate(layout, null) as PlayerView
+                view.apply {
+                    useController = false
+                    // Transparent background: zones overlap by design (a ticker over video is the
+                    // most common signage layout) and an opaque surface would black out whatever is
+                    // beneath.
+                    setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+                    // Hold the last rendered frame instead of blanking whenever the player is reset
+                    // or its item changes. Without this the view clears itself to nothing at exactly
+                    // the moment we are trying to bridge.
+                    setKeepContentOnPlayerReset(true)
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    )
+                    this.player = player
+                }
+            },
+            update = { view ->
+                // Deliberately does NOT reassign the player. Handing a PlayerView a player detaches
+                // the old surface and attaches a new one; doing that on every recomposition is a
+                // black flash several times a second.
+                view.resizeMode = fitMode.toResizeMode()
+            },
+            // Only reached when the surface type flips, or the zone leaves. Detaching the player
+            // from the view being thrown away also unregisters its listener; Media3 ignores the
+            // surface clear when another view has already taken over, so this cannot blank the
+            // incoming one whichever order Compose disposes and creates in.
+            onRelease = { view -> view.player = null },
+            modifier = Modifier
+                .fillMaxSize()
+                // Hidden, not removed, while an image is up — the surface and its decoder survive.
+                // Only meaningful on the TextureView path; a zone that gets here with a SurfaceView
+                // has no images to hide behind, so this is always 1f for it.
+                .alpha(if (targetItem != null) 1f else 0f),
+        )
+    }
 }
 
 /** The manifest's `fitMode` — the CMS offers cover / contain / fill. */

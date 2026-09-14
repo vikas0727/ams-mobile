@@ -1,30 +1,30 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    The video surface for one zone.
+    The video surface for one zone — the FAST path, used whenever nobody is watching this screen
+    remotely, which is essentially always.
 
-    This layout exists for exactly one attribute: `surface_type="texture_view"`.
+    surface_type="surface_view" puts the decoded video on its own hardware layer, composited by
+    SurfaceFlinger without ever passing through the app's GPU pipeline. That is what a set-top box
+    is built to do: the decoder writes straight to the display and the app spends nothing per frame.
 
-    PlayerView defaults to a SurfaceView, which SurfaceFlinger composites OUTSIDE the app's window.
-    `PixelCopy.request(window, ...)` — what the SCREENSHOT command uses — reads the window's own
-    surface, so with a SurfaceView it captures every overlay and none of the video: the CMS's Live
-    Data View preview comes back as a solid black rectangle on a screen that is playing perfectly.
+    The TextureView alternative (zone_player_view_capture.xml) costs an extra full-frame GPU copy at
+    the video's frame rate. On a 2GB Android TV box driving 1080p that is not "a few percent of
+    GPU", which an earlier comment here claimed — it is the difference between smooth playback and
+    visible judder, and it was being paid on every screen in the fleet, permanently, to make a
+    screenshot feature work that almost nobody was using at any given moment.
 
-    A TextureView renders into the view hierarchy, so it is part of the window and the capture shows
-    what is actually on the wall. The cost is one extra GPU copy per frame versus a SurfaceView; for
-    1080p H.264 on the Droidlogic units that is comfortably affordable, and a remote screenshot that
-    never works is worse than a few percent of GPU.
+    So the surface type now follows the Live Data View toggle: this layout by default, and the
+    TextureView one only while an operator actually has the panel open. See ZoneRenderer.VideoLayer.
 
     surface_type can only be set here — PlayerView reads it at inflation and it cannot be changed in
-    code afterwards — which is why this file exists rather than a builder call in ZoneRenderer.
-    If a future panel ever struggles with 4K, switching back is a one-word edit here, at the price of
-    black screenshots.
+    code afterwards — which is why there are two files rather than one builder call.
 -->
 <androidx.media3.ui.PlayerView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@android:color/transparent"
-    app:surface_type="texture_view"
+    app:surface_type="surface_view"
     app:use_controller="false"
     app:hide_on_touch="false"
     app:resize_mode="fit" />
