@@ -369,6 +369,8 @@ class MainActivity : ComponentActivity(), PlayerHost {
 
     override fun currentlyPlaying(): String? = playerViewModel?.currentlyPlaying()
 
+    override fun playbackState(): PlayerHost.PlaybackState? = playerViewModel?.playbackState()
+
     private companion object {
         const val TAG = "MainActivity"
     }

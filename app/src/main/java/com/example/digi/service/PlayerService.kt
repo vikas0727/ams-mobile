@@ -20,6 +20,7 @@ import com.example.digi.core.PlayerHost
 import com.example.digi.core.ServerClock
 import com.example.digi.data.remote.dto.SettingsDto
 import com.example.digi.device.DeviceController
+import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -97,7 +98,7 @@ class PlayerService : Service() {
 
             loopJob = scope.launch { runLoop() }
             scope.launch { watchNetwork() }
-            scope.launch { streamLiveFrames() }
+            scope.launch { streamPlaybackState() }
         }
         // STICKY so that a system kill under memory pressure brings the loop back by itself. There
         // is nobody standing at the box to restart it.
@@ -379,29 +380,48 @@ class PlayerService : Service() {
     }
 
     /**
-     * The Live Data View stream.
+     * Tell the server what is on the panel, while somebody is watching.
      *
-     * Its own loop rather than a step inside the tick, because it runs at a different cadence for a
-     * different reason: an operator watching a preview wants a fresh picture every few seconds,
-     * while the tick exists to catch schedule boundaries. Folding the two together would either
-     * make the preview sluggish or make the tick expensive.
+     * This replaced a loop that captured the screen and uploaded a JPEG every five seconds. That
+     * approach was expensive at both ends and still only produced a slideshow: a still every five
+     * seconds cannot show video, which is the one thing an operator wants to see. Worse, producing
+     * one cost a full-surface readback on the device, so opening the preview degraded the very
+     * playback it was meant to observe.
      *
-     * Costs nothing when nobody is watching. [LiveFrameReporter.pushFrame] returns false the moment
-     * the flag is off or the server says the panel has been closed, and this drops back to polling
-     * that flag once a second — which is a boolean read, not a request.
+     * Reporting POSITION instead lets the CMS play the same files from the CDN, seeked to where
+     * this device actually is. The operator gets real video at full frame rate, and the device
+     * sends a few hundred bytes rather than 40KB of JPEG.
+     *
+     * It is honest in a way the browser could not be on its own: the CMS holds the same manifest
+     * and could compute a position from the clock, but that only shows what the screen SHOULD be
+     * playing. These packets say what it IS playing — and when they stop arriving, the preview says
+     * the screen is not reporting instead of cheerfully playing content a dead panel is not showing.
      */
-    private suspend fun streamLiveFrames() {
+    private suspend fun streamPlaybackState() {
         while (scope.isActive) {
             if (!graph.store.realtimeCaptureEnabled) {
-                delay(IDLE_FRAME_CHECK_MS)
+                delay(IDLE_STATE_CHECK_MS)
                 continue
             }
 
-            val keepGoing = runCatching { graph.liveFrames.pushFrame() }
-                .onFailure { AppLog.d(TAG, "Live frame skipped: $it") }
-                .getOrDefault(true)
+            runCatching {
+                val host = PlayerHost.current()
+                val state = host?.playbackState()
+                val payload = JSONObject()
+                    .put("mediaId", state?.mediaId ?: JSONObject.NULL)
+                    .put("name", state?.name ?: JSONObject.NULL)
+                    .put("mediaType", state?.mediaType ?: JSONObject.NULL)
+                    .put("positionMs", state?.positionMs ?: 0L)
+                    .put("slideIndex", state?.slideIndex ?: -1)
+                    .put("durationMs", state?.durationMs ?: 0L)
+                    // False covers both "blanked" and "the UI is not in the foreground at all",
+                    // which from the operator's side are the same fact: nothing is on the glass.
+                    .put("playing", state?.playing == true)
+                    .put("reportedAt", ServerClock.isoUtc())
+                graph.realtime.emitPlayerState(payload)
+            }.onFailure { AppLog.d(TAG, "Could not report playback state: $it") }
 
-            delay(if (keepGoing) LIVE_FRAME_MS else IDLE_FRAME_CHECK_MS)
+            delay(PLAYBACK_STATE_MS)
         }
     }
 
@@ -501,14 +521,15 @@ class PlayerService : Service() {
         /** Heartbeat cadence while a screen has no content — see [beatIntervalMs]. */
         private const val IDLE_BEAT_MS = 15_000L
 
-        /** How often a watched screen pushes a preview frame. Matches the server's
-         *  LIVE_FRAME_INTERVAL_SECONDS, and the CMS polls at the same rate. */
-        private const val LIVE_FRAME_MS = 5_000L
+        /** How often a watched screen reports its position. Two seconds rather than five: this is
+         *  a few hundred bytes, and the preview corrects drift on each one, so a tighter cadence
+         *  costs almost nothing and keeps the browser visibly in step. */
+        private const val PLAYBACK_STATE_MS = 2_000L
 
-        /** How often to re-check the capture flag while nobody is watching. A boolean read from
+        /** How often to re-check the watch flag while nobody is watching. A boolean read from
          *  SharedPreferences, so this is free — it exists only so switching the panel on is noticed
          *  within a second rather than at the next heartbeat. */
-        private const val IDLE_FRAME_CHECK_MS = 1_000L
+        private const val IDLE_STATE_CHECK_MS = 1_000L
 
         private val state = MutableStateFlow(ServiceState())
         val serviceState: StateFlow<ServiceState> = state.asStateFlow()

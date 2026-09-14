@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.digi.core.AmsConstants
 import com.example.digi.core.AppLog
 import com.example.digi.core.DigiApp
+import com.example.digi.core.PlayerHost
 import com.example.digi.core.ServerClock
 import com.example.digi.data.repo.ContentRepository
 import com.example.digi.player.ClusterPlan
@@ -237,6 +238,31 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         val main = frame.zones.firstOrNull { it.slide != null } ?: return null
         val name = main.slide?.name ?: return null
         return "${frame.layout.name ?: frame.layout.key} · $name"
+    }
+
+    /**
+     * The main zone's real position, for the CMS live preview.
+     *
+     * "Main zone" is the first zone with something on it, which is the same choice
+     * [currentlyPlaying] makes — a multi-zone layout has no single answer, and the preview is
+     * showing the whole layout anyway; this is only what it synchronises ITS clock to.
+     */
+    fun playbackState(): PlayerHost.PlaybackState? {
+        val frame = _frame.value ?: return null
+        val main = frame.zones.firstOrNull { it.slide != null } ?: return null
+        val slide = main.slide ?: return null
+        return PlayerHost.PlaybackState(
+            mediaId = slide.mediaId,
+            name = slide.name,
+            mediaType = slide.mediaType,
+            positionMs = main.offsetInSlideMs,
+            slideIndex = main.slideIndex,
+            durationMs = slide.durationMs,
+            // Blanked is still "playing" as far as the loop is concerned — the engine keeps
+            // running so POWER_ON resumes in the right place — but nothing is on the glass, and
+            // the preview must not imply otherwise.
+            playing = !_blanked.value,
+        )
     }
 
     fun setBlanked(value: Boolean) {

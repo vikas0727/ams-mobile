@@ -51,6 +51,39 @@ interface PlayerHost {
     /** What is on the wall right now, in the form the CMS screen list shows verbatim. */
     fun currentlyPlaying(): String?
 
+    /**
+     * What is on the panel right now, precisely enough for the CMS to play the same thing.
+     *
+     * This is what makes the CMS preview LIVE rather than a simulation. The browser holds the same
+     * manifest and could compute a position from the clock on its own — and used to — but that only
+     * ever shows what the screen SHOULD be playing. It cannot tell that the app restarted ten
+     * seconds ago, that an asset never downloaded and is being skipped, or that the panel is sitting
+     * on a "no content" card. Reporting the real slide and the real offset closes that gap, and it
+     * costs the device a few hundred bytes rather than a frame capture.
+     *
+     * Null when nothing is playing — which is itself the answer, and the CMS says so instead of
+     * playing content the wall is not showing.
+     */
+    fun playbackState(): PlaybackState?
+
+    /**
+     * @param mediaId      the media the main zone is showing
+     * @param positionMs   how far into that slide the device actually is
+     * @param slideIndex   position in the zone's slide list, so the CMS can follow a loop that has
+     *                     drifted from the arithmetic rather than snapping back to it
+     * @param durationMs   the slide's full length, so the CMS can tell a seek from a boundary
+     * @param playing      false while blanked by a schedule or a POWER_OFF command
+     */
+    data class PlaybackState(
+        val mediaId: String?,
+        val name: String?,
+        val mediaType: String?,
+        val positionMs: Long,
+        val slideIndex: Int,
+        val durationMs: Long,
+        val playing: Boolean,
+    )
+
     companion object {
         @Volatile
         private var registered: PlayerHost? = null

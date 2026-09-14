@@ -110,6 +110,27 @@ class RealtimeChannel(
         }
     }
 
+    /**
+     * Tell the server what is on the panel right now, for the CMS live preview.
+     *
+     * Fire-and-forget over the socket that is already open: no response is expected, nothing waits
+     * on it, and a packet lost to a flaky link costs the preview one correction it will get again
+     * two seconds later. That is why this rides the socket rather than an HTTP call — the whole
+     * point is that it must be cheap enough to send continuously while somebody is watching.
+     *
+     * Silently does nothing when the socket is down, which is the correct behaviour: the CMS then
+     * sees the state go stale and says the screen is not reporting, rather than showing a preview
+     * that claims to be live.
+     */
+    fun emitPlayerState(state: JSONObject) {
+        val client = socket ?: return
+        runCatching {
+            store.screenId?.let { id ->
+                client.emit(EVENT_PLAYER_STATE, state.put("screenId", id))
+            }
+        }
+    }
+
     fun disconnect() {
         runCatching {
             socket?.let { client ->
@@ -133,6 +154,7 @@ class RealtimeChannel(
     private companion object {
         const val TAG = "Realtime"
         const val EVENT_WATCH = "watch-screen"
+        const val EVENT_PLAYER_STATE = "player-state"
         const val EVENT_LEAVE = "leave-screen"
         const val EVENT_CONTENT_UPDATED = "content-updated"
         const val EVENT_COMMAND_QUEUED = "command-queued"
