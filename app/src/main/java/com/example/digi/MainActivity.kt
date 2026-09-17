@@ -1,6 +1,8 @@
 package com.example.digi
 
 import android.graphics.Bitmap
+import android.graphics.RectF
+import android.graphics.Canvas
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -54,6 +56,7 @@ import com.example.digi.ui.diagnostics.DiagnosticsOverlay
 import com.example.digi.ui.pairing.PairingScreen
 import com.example.digi.ui.pairing.PairingViewModel
 import com.example.digi.ui.player.PlayerScreen
+import com.example.digi.ui.player.VideoSurfaces
 import com.example.digi.ui.player.PlayerViewModel
 import com.example.digi.ui.theme.DigiTheme
 import java.io.File
@@ -350,23 +353,8 @@ class MainActivity : ComponentActivity(), PlayerHost {
                 return@withContext null
             }
 
-            /*
-             * The window copy is the whole capture, again.
-             *
-             * A previous version read each video SurfaceView separately with PixelCopy and drew the
-             * result over this bitmap, on the theory that a SurfaceView is never in a window copy.
-             * That theory is right in general and was wrong here: on this fleet's boxes the window
-             * copy already contained the video — the zone is on a TextureView whenever Live Data
-             * View is on, which is exactly when screenshots are being taken — so the overlay could
-             * only ever repaint a correct picture with whatever the second copy returned, and on
-             * hardware where that second read comes back empty the result was a black rectangle
-             * over a screenshot that had been fine.
-             *
-             * Left out rather than made conditional. If a genuinely black-video screenshot shows up
-             * on a box with Live Data View OFF, the fix is to read that one surface and composite
-             * only when the window copy is actually empty there — provable on the device, which the
-             * removed version was not.
-             */
+            // Fill in any video that the window copy missed — see overlayVideoSurfaces.
+            overlayVideoSurfaces(bitmap, targetWidth.toFloat() / sourceWidth, thread)
 
             // Compression is the slow part and needs no window, so it goes off the main thread — an
             // encode on a cheap SoC is comfortably long enough to drop frames, and at one live frame
@@ -395,6 +383,103 @@ class MainActivity : ComponentActivity(), PlayerHost {
             if (!reusable) runCatching { bitmap.recycle() }
             null
         }
+    }
+
+    /**
+     * Draw each video surface into the window copy — but only when it has something to add.
+     *
+     * `PixelCopy.request(window, …)` reads the window's own surface. A SurfaceView is not part of
+     * it: it is a separate surface the display composites behind the window, showing through a hole
+     * punched in it. So a window copy of a screen playing video through a SurfaceView comes back
+     * with a black rectangle where the picture is, which is the black layer over otherwise-correct
+     * screenshots. It does not happen while Live Data View is on, because the renderer switches that
+     * zone to a TextureView — which IS in the window — and that is why this looked fine for so long.
+     *
+     * ## The guard, which is the important part
+     *
+     * An earlier version of this drew the second copy unconditionally, and on hardware where the
+     * per-surface read also came back empty it painted black over screenshots that had been
+     * perfectly good. Compositing something over a correct picture on the assumption that it must be
+     * better is exactly the mistake that caused, rather than fixed, a black screenshot.
+     *
+     * So the copy has to prove it has content before it is used. If the read fails, or comes back
+     * blank, the window copy is left exactly as it was — this can add the video back, and it cannot
+     * take anything away. A genuinely black frame is skipped too, which costs nothing: the window
+     * copy is black there as well.
+     *
+     * Nothing about playback changes — no surface swap, no blink, no decoder churn.
+     */
+    private suspend fun overlayVideoSurfaces(target: Bitmap, scale: Float, thread: HandlerThread) {
+        val surfaces = VideoSurfaces.capturable()
+        if (surfaces.isEmpty()) return
+
+        val canvas = Canvas(target)
+        val decorAt = IntArray(2).also { window.decorView.getLocationInWindow(it) }
+
+        for (surface in surfaces) {
+            val frame = runCatching {
+                Bitmap.createBitmap(surface.width, surface.height, Bitmap.Config.ARGB_8888)
+            }.getOrNull() ?: continue
+
+            val done = CompletableDeferred<Boolean>()
+            val requested = runCatching {
+                PixelCopy.request(
+                    surface,
+                    frame,
+                    { status -> done.complete(status == PixelCopy.SUCCESS) },
+                    Handler(thread.looper),
+                )
+            }.isSuccess
+
+            when {
+                !requested || !done.await() ->
+                    AppLog.d(TAG, "Could not read a video surface for the capture; window copy kept")
+
+                !hasVisibleContent(frame) ->
+                    AppLog.d(TAG, "Video surface copy came back blank; window copy kept")
+
+                else -> {
+                    val at = IntArray(2).also { surface.getLocationInWindow(it) }
+                    val left = (at[0] - decorAt[0]) * scale
+                    val top = (at[1] - decorAt[1]) * scale
+                    canvas.drawBitmap(
+                        frame,
+                        null,
+                        RectF(left, top, left + surface.width * scale, top + surface.height * scale),
+                        null,
+                    )
+                }
+            }
+            frame.recycle()
+        }
+    }
+
+    /**
+     * Is there anything actually drawn in this bitmap?
+     *
+     * Sampled on a coarse grid rather than read whole: this decides whether to use a copy, and
+     * walking two million pixels to answer it would cost more than the copy did. A grid this dense
+     * cannot miss a video frame — any real picture has thousands of lit pixels — while a surface
+     * that returned transparent or black has none anywhere.
+     */
+    private fun hasVisibleContent(bitmap: Bitmap): Boolean {
+        val stepX = (bitmap.width / SAMPLE_STEPS).coerceAtLeast(1)
+        val stepY = (bitmap.height / SAMPLE_STEPS).coerceAtLeast(1)
+        var x = 0
+        while (x < bitmap.width) {
+            var y = 0
+            while (y < bitmap.height) {
+                val pixel = bitmap.getPixel(x, y)
+                val alpha = (pixel ushr 24) and 0xFF
+                if (alpha > MIN_VISIBLE_ALPHA) {
+                    val sum = ((pixel shr 16) and 0xFF) + ((pixel shr 8) and 0xFF) + (pixel and 0xFF)
+                    if (sum > MIN_VISIBLE_CHANNEL_SUM) return true
+                }
+                y += stepY
+            }
+            x += stepX
+        }
+        return false
     }
 
     /**
@@ -441,6 +526,13 @@ class MainActivity : ComponentActivity(), PlayerHost {
 
     private companion object {
         const val TAG = "MainActivity"
+
+        /** Grid density for [hasVisibleContent] — 24 x 24 samples across the surface. */
+        const val SAMPLE_STEPS = 24
+
+        /** Below these a pixel is transparent or black, and proves nothing about the copy. */
+        const val MIN_VISIBLE_ALPHA = 16
+        const val MIN_VISIBLE_CHANNEL_SUM = 24
     }
 }
 
