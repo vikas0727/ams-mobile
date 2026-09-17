@@ -367,7 +367,30 @@ private fun VideoLayer(
      * screenshot taken here so far has quietly been using. See VideoSurfaces.
      */
     val capturing by VideoSurfaces.textureRequired.collectAsStateWithLifecycle()
-    val needsTextureView = captureEnabled || mixesImages || capturing
+    val wantsTextureView = captureEnabled || mixesImages || capturing
+
+    /*
+     * Latched on, never off, for as long as this zone lives.
+     *
+     * Going UP — SurfaceView to TextureView — is safe: the player is playing, so the new surface has
+     * a frame on it within a frame or two. Coming back DOWN is not, and that is the black screen
+     * after switching Live Data View off. A rebuilt surface starts empty and is filled by the next
+     * decoded frame, so it only recovers if a frame is coming. Between clips, or on a short clip
+     * held at its last frame by `pauseAtEndOfMediaItems`, the player is paused and no frame is ever
+     * coming — the zone stays black until something else happens to move it.
+     *
+     * The swap could be made safe by nudging the player to re-render, but that means a seek on a
+     * live wall to fix a problem that only exists because the surface was downgraded at all. Not
+     * downgrading is the smaller change and it cannot fail.
+     *
+     * The cost, stated plainly: a zone that has once been watched or photographed keeps the more
+     * expensive surface until the playlist changes or the app restarts — which is a risk of judder
+     * on a 2GB box, against a guaranteed black screen the other way. The fast path still applies
+     * where it matters, to every screen that is simply playing and that nobody has looked at.
+     */
+    var latchedTextureView by remember(zoneKey) { mutableStateOf(wantsTextureView) }
+    LaunchedEffect(wantsTextureView) { if (wantsTextureView) latchedTextureView = true }
+    val needsTextureView = wantsTextureView || latchedTextureView
 
     // `key` rather than a branch inside the factory: surface_type is read at inflation and cannot be
     // changed afterwards, so flipping it means building a new PlayerView. The ExoPlayer itself is
