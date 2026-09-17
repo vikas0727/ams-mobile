@@ -49,6 +49,13 @@
         android:networkSecurityConfig="@xml/network_security_config"
         android:theme="@style/Theme.Digi">
 
+        <!--
+            windowSoftInputMode=adjustResize so the window actually shrinks when the IME opens,
+            which is what gives Compose's imePadding() on the pairing screen something to work
+            with. Left unspecified, the framework chooses for itself, and on most of these boxes it
+            chose to pan: the keyboard then covered the code boxes and the Pair button with no way
+            to reach them. The player never raises an IME, so this costs it nothing.
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -56,6 +63,7 @@
             android:launchMode="singleTask"
             android:screenOrientation="landscape"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density|smallestScreenSize"
+            android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.Digi"
             tools:ignore="DiscouragedApi,LockedOrientationActivity">
             <intent-filter>

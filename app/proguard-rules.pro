@@ -33,3 +33,12 @@
 # REBOOT_DEVICE and the kiosk paths reach hidden framework APIs by reflection; keeping the call
 # sites out of R8's hands avoids a silently no-op command on a release build.
 -keep class com.example.digi.device.DeviceController { *; }
+
+# ── Firebase Crashlytics ─────────────────────────────────────────────────────
+# Without these a release stack trace arrives in the console with no file or line — technically a
+# crash report, practically a shrug. The mapping file is uploaded by the Crashlytics Gradle plugin
+# and deobfuscates class and method names, but it cannot invent line numbers that were stripped.
+-keepattributes SourceFile,LineNumberTable
+# Keep custom exception types intact so Crashlytics groups issues by the type actually thrown
+# rather than by whatever R8 renamed it to this build.
+-keep public class * extends java.lang.Exception

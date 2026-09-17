@@ -2,6 +2,7 @@ package com.example.digi.data.repo
 
 import com.example.digi.core.AmsConstants
 import com.example.digi.core.AppLog
+import com.example.digi.core.FirebaseTelemetry
 import com.example.digi.core.ServerClock
 import com.example.digi.data.local.PlayerStore
 import com.example.digi.data.remote.ApiResult
@@ -77,6 +78,15 @@ class PairingRepository(
                 // reports stale content and pulls a manifest immediately rather than waiting for
                 // the CMS to change something.
                 store.contentVersion = -1
+                // The app started unpaired, so telemetry is currently tagged "unpaired". Re-tag now
+                // rather than at the next launch: a box that crashes during its first sync is one of
+                // the more interesting crashes there is, and it would otherwise arrive anonymous.
+                FirebaseTelemetry.identify(
+                    screenId = body.screen.id,
+                    screenName = body.screen.name,
+                    deviceId = store.deviceUniqueId,
+                )
+                FirebaseTelemetry.event("screen_paired")
                 AppLog.i(TAG, "Paired as '${body.screen.name}' (${body.screen.id})")
                 PairOutcome.Paired(body.screen.name)
             }

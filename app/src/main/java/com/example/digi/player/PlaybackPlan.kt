@@ -27,7 +27,17 @@ data class PlaybackPlan(
     /** Assets referenced but not yet on disk. Non-empty means playback is running degraded. */
     val missingAssets: Int = 0,
 ) {
-    val hasContent: Boolean get() = layouts.any { layout -> layout.zones.any { it.slides.isNotEmpty() } }
+    /**
+     * Is there anything this screen can actually show right now?
+     *
+     * Counts RENDERABLE slides, not merely present ones. A manifest assigns files; only downloading
+     * them makes them showable, and on a box where the download failed those are very different
+     * numbers. Answering "yes" on the strength of the manifest alone put the player into its
+     * playing branch with nothing to draw — a black screen with no message, while the download
+     * failure that caused it sat one state away, unable to reach the glass.
+     */
+    val hasContent: Boolean
+        get() = layouts.any { layout -> layout.zones.any { zone -> zone.slides.any { it.isRenderable } } }
 
     /** Total length of one full pass through every layout. */
     val cycleDurationMs: Long get() = layouts.sumOf { it.durationMs }.coerceAtLeast(1L)
@@ -90,6 +100,17 @@ data class PlanSlide(
 ) {
     val isVideo: Boolean get() = mediaType == AmsConstants.MediaType.VIDEO
     val isPlayable: Boolean get() = !isBlank && localPath != null
+
+    /**
+     * Will this slide put anything on the glass — a downloaded file, or a deliberate blank gap?
+     *
+     * The distinction that matters is between a slide that EXISTS in the manifest and one that can
+     * actually be shown. A slide whose file never downloaded is the first but not the second, and
+     * treating the two as the same is what let a screen with nothing on disk still count as
+     * "playing": it rendered a layout of empty zones, which on a wall is an unexplained black
+     * screen rather than the download error it actually is.
+     */
+    val isRenderable: Boolean get() = isPlayable || isBlank
 }
 
 /**

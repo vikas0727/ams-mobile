@@ -39,6 +39,23 @@ class DigiApp : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+
+        /*
+         * Telemetry first, before anything that could fail.
+         *
+         * Crashlytics installs an uncaught-exception handler when it initialises, so anything set up
+         * after this point is covered and anything before it is not. Start-up is precisely where a
+         * box with a broken keystore or a corrupt database dies, and those are the crashes hardest
+         * to get at from a wall.
+         */
+        FirebaseTelemetry.init(this)
+        FirebaseTelemetry.identify(
+            screenId = graph.store.screenId,
+            screenName = graph.store.screenName,
+            deviceId = graph.store.deviceUniqueId,
+        )
+        FirebaseTelemetry.setKey("content_version", graph.store.contentVersion.toString())
+
         ServerClock.attach(graph.store)
         graph.network.start()
         AppLog.i(TAG, "AMS Player starting (${com.example.digi.BuildConfig.VERSION_NAME})")
@@ -77,6 +94,11 @@ class DigiApp : Application() {
                 baseUrl = com.example.digi.BuildConfig.API_BASE_URL,
                 onContentChanged = { onPush?.invoke("content-updated") },
                 onCommandQueued = { onPush?.invoke("command-queued") },
+                // A reconnect means the socket was down for a while, and anything the server
+                // emitted into this screen's room during that gap went nowhere — rooms are not
+                // replayed. Beat straight away rather than waiting out the interval to discover a
+                // setting that was changed while the link was flapping.
+                onReconnected = { onPush?.invoke("push channel reconnected") },
             )
         }
 

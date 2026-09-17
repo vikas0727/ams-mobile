@@ -268,6 +268,135 @@ object DeviceController {
         )
     }
 
+    /* ── keeping the panel awake ───────────────────────────────────────────── */
+
+    /**
+     * Stop the system putting this panel to sleep.
+     *
+     * `FLAG_KEEP_SCREEN_ON`, set on the player's window, is the app-level half of this and is not
+     * enough on its own for two reasons. It only holds while that window is in the foreground — so
+     * a box that drops to its launcher for any reason starts counting down again — and on several
+     * Android TV builds the screen saver and the system sleep timeout are evaluated independently
+     * of it, which is why a screen can go dark at exactly thirty minutes with the player still
+     * running and the flag still set.
+     *
+     * The partial wake lock the service holds does not help here either, and is not meant to: it
+     * keeps the CPU alive so the loop keeps beating with the panel off. Nothing about it touches
+     * the display.
+     *
+     * So this walks down what the box will actually allow, and reports which rung it reached:
+     *
+     *  1. `SCREEN_OFF_TIMEOUT`, with WRITE_SETTINGS — the permission the app already asks for so it
+     *     can set brightness. This is the one that matters on most boxes.
+     *  2. The screen saver and stay-awake-while-plugged-in flags, which live in Secure/Global and
+     *     need WRITE_SECURE_SETTINGS — privileged, so an ordinary install will not get them.
+     *  3. The same settings through `su`, for the rooted boxes a lot of signage hardware turns out
+     *     to be.
+     *
+     * Never fatal, and never silently assumed to have worked: a screen that still sleeps is a
+     * support call, and the difference between "we could not set this" and "we set it and it did
+     * not help" is the whole diagnosis.
+     */
+    fun keepScreenAwake(context: Context): Outcome {
+        val applied = mutableListOf<String>()
+        val refused = mutableListOf<String>()
+
+        // 1. The system sleep timeout. Int.MAX_VALUE is how "never" is expressed here; there is no
+        //    separate never constant, and 0 means "immediately", which would be the exact opposite.
+        if (canWriteSystemSettings(context)) {
+            val wrote = runCatching {
+                Settings.System.putInt(
+                    context.contentResolver,
+                    Settings.System.SCREEN_OFF_TIMEOUT,
+                    Int.MAX_VALUE,
+                )
+            }.getOrDefault(false)
+            if (wrote) applied += "sleep timeout disabled" else refused += "sleep timeout"
+        } else {
+            refused += "sleep timeout (WRITE_SETTINGS not granted)"
+        }
+
+        // 2. Screen saver and stay-on-while-charging. Both are privileged writes that throw
+        //    SecurityException on an ordinary install, which is expected rather than exceptional.
+        if (putSecureInt(context, Settings.Secure.SCREENSAVER_ENABLED, 0)) {
+            applied += "screen saver off"
+        } else {
+            refused += "screen saver"
+        }
+
+        // BatteryManager plug bitmask: AC | USB | WIRELESS. A mains-powered signage box is always
+        // "plugged in", so this pins the display on for the whole time it has power.
+        if (putGlobalInt(context, Settings.Global.STAY_ON_WHILE_PLUGGED_IN, STAY_ON_ALL_PLUG_TYPES)) {
+            applied += "stay-on while powered"
+        } else {
+            refused += "stay-on while powered"
+        }
+
+        // 3. su, for the boxes that have it. Same settings, written by a shell that is allowed to.
+        if (refused.isNotEmpty() && runSuSettings()) {
+            applied += "applied over su"
+            refused.clear()
+        }
+
+        return when {
+            refused.isEmpty() -> Outcome.ok("Screen held awake: ${applied.joinToString(", ")}")
+            applied.isEmpty() -> Outcome.failed(
+                "Could not stop the system sleeping the panel (${refused.joinToString(", ")}). " +
+                    "The window flag still holds the screen on while the player is in front."
+            )
+            else -> Outcome.partial(
+                "Screen held awake: ${applied.joinToString(", ")}. Not permitted: ${refused.joinToString(", ")}."
+            )
+        }
+    }
+
+    /**
+     * Has something put the sleep timeout back?
+     *
+     * A system update, a factory-reset wizard, or an operator poking around in Settings will all
+     * quietly restore a fifteen-minute timeout, and the symptom is a panel that goes dark weeks
+     * after anyone last touched it. A read is cheap enough to do on a heartbeat; a write is not, so
+     * this answers whether one is warranted rather than just writing again.
+     *
+     * Anything at or above [MIN_ACCEPTABLE_TIMEOUT_MS] is left alone, including the Int.MAX_VALUE
+     * this sets — there is no reason to fight an operator who deliberately chose an hour.
+     */
+    fun screenTimeoutNeedsReapply(context: Context): Boolean = runCatching {
+        if (!canWriteSystemSettings(context)) return false
+        val current = Settings.System.getInt(
+            context.contentResolver,
+            Settings.System.SCREEN_OFF_TIMEOUT,
+            Int.MAX_VALUE,
+        )
+        // 0 or negative means "never" on some builds and "immediately" on others; only a positive
+        // value below the floor is unambiguously a timeout that will darken the panel.
+        current in 1 until MIN_ACCEPTABLE_TIMEOUT_MS
+    }.getOrDefault(false)
+
+    private fun putSecureInt(context: Context, key: String, value: Int): Boolean = runCatching {
+        Settings.Secure.putInt(context.contentResolver, key, value)
+    }.getOrDefault(false)
+
+    private fun putGlobalInt(context: Context, key: String, value: Int): Boolean = runCatching {
+        Settings.Global.putInt(context.contentResolver, key, value)
+    }.getOrDefault(false)
+
+    /**
+     * The same three settings through a root shell.
+     *
+     * Only reached when the framework refused, and only succeeds on a rooted or system-signed box —
+     * which, unlike a phone, a signage panel very often is. Failure here is the ordinary case and
+     * is not logged as an error.
+     */
+    private fun runSuSettings(): Boolean = runCatching {
+        val process = Runtime.getRuntime().exec("su")
+        process.outputStream.bufferedWriter().use { shell ->
+            SU_AWAKE_COMMANDS.forEach { shell.write(it + "\n") }
+            shell.write("exit\n")
+        }
+        process.waitFor() == 0
+    }.getOrDefault(false)
+
     /** Pulls the player back to the front — the watchdog behind `keepOnTop`. */
     fun bringToFront(context: Context) {
         runCatching {
@@ -289,6 +418,25 @@ object DeviceController {
 
     /** Tried in order; the clean framework route first, the direct binary as the fallback. */
     private val SU_REBOOT_COMMANDS = listOf("svc power reboot", "reboot", "/system/bin/reboot")
+
+    /** AC | USB | WIRELESS from BatteryManager — every way a box can be receiving power. */
+    private const val STAY_ON_ALL_PLUG_TYPES = 1 or 2 or 4
+
+    /** Below half an hour, a timeout is something to correct rather than a choice to respect. */
+    private const val MIN_ACCEPTABLE_TIMEOUT_MS = 30 * 60 * 1000
+
+    /**
+     * The keep-awake settings, as a root shell would write them.
+     *
+     * `svc power stayon true` is the one that does the real work on most boxes; the two explicit
+     * writes cover builds where svc is absent or where the screen saver is the thing turning the
+     * panel off.
+     */
+    private val SU_AWAKE_COMMANDS = listOf(
+        "settings put system screen_off_timeout 2147483647",
+        "settings put secure screensaver_enabled 0",
+        "svc power stayon true",
+    )
 
     private fun runSuCommand(command: String): Boolean = runCatching {
         val process = Runtime.getRuntime().exec("su")

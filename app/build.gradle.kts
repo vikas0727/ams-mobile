@@ -9,6 +9,30 @@ plugins {
 }
 
 /*
+ * Firebase is optional at build time, and deliberately so.
+ *
+ * Both Google plugins fail the build outright when `app/google-services.json` is absent — not a
+ * warning, a hard error. That file comes out of a Firebase console project and is not in the repo,
+ * so applying them unconditionally would mean nobody could build this app without first being
+ * given access to a Firebase project. For a player whose whole job is to keep running, refusing to
+ * compile is the worse failure.
+ *
+ * So: drop the file in and crash reporting builds in; leave it out and everything else still
+ * compiles, with FirebaseTelemetry reporting itself unavailable at runtime. The Firebase libraries
+ * stay on the classpath either way — without the generated config FirebaseApp simply never
+ * initialises, which is the state that facade is written around.
+ */
+val firebaseConfigured = file("google-services.json").exists()
+if (firebaseConfigured) {
+    apply(plugin = "com.google.gms.google-services")
+    apply(plugin = "com.google.firebase.crashlytics")
+} else {
+    logger.lifecycle(
+        "[digi] app/google-services.json not found — building without Firebase Crashlytics/Analytics.",
+    )
+}
+
+/*
  * Build configuration comes from local.properties (git-ignored) so the AES secret that pairs this
  * player with the AMS backend never lands in the repository. gradle.properties holds harmless
  * defaults so a fresh clone still configures; a build with the placeholder key will fail to decrypt
@@ -45,6 +69,9 @@ android {
         buildConfigField("String", "AES_SECRET_KEY", "\"${buildValue("digi.aesSecretKey", "CHANGE_ME")}\"")
         buildConfigField("String", "AES_IV", "\"${buildValue("digi.aesIv", "00000000000000000000000000000000")}\"")
         buildConfigField("boolean", "AES_ENABLED", buildValue("digi.aesEnabled", "true"))
+        // Lets the app say "Firebase: not configured in this build" on the diagnostics overlay
+        // rather than "not reporting", which reads like a fault.
+        buildConfigField("boolean", "FIREBASE_CONFIGURED", firebaseConfigured.toString())
     }
 
     buildTypes {
@@ -132,6 +159,21 @@ dependencies {
 
     implementation(libs.coil.compose)
     implementation(libs.coil.gif)
+
+    /*
+     * Crash and usage reporting.
+     *
+     * Present whether or not google-services.json is, so the code compiles either way; inert
+     * without it, because FirebaseApp never initialises and FirebaseTelemetry checks for that.
+     *
+     * Worth knowing before trusting the numbers: firebase-analytics needs Google Play services,
+     * which plenty of cheap Android TV boxes do not ship. Crashlytics does not — it uploads through
+     * its own transport — so on a Play-less box crashes still arrive and analytics events do not.
+     * The CMS event log (EventReporter) remains the reporting path that works on every device.
+     */
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.crashlytics)
+    implementation(libs.firebase.analytics)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)

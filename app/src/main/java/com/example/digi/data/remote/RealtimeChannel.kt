@@ -4,6 +4,9 @@ import com.example.digi.core.AppLog
 import com.example.digi.data.local.PlayerStore
 import io.socket.client.IO
 import io.socket.client.Socket
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
 import java.net.URI
 
@@ -40,10 +43,36 @@ class RealtimeChannel(
     private val onContentChanged: () -> Unit,
     /** Called when a command has been queued for this screen. */
     private val onCommandQueued: () -> Unit,
+    /** Called each time the channel comes up, so the caller can catch up on what it missed. */
+    private val onReconnected: () -> Unit = {},
 ) {
 
     @Volatile
     private var socket: Socket? = null
+
+    /**
+     * Whether the push channel is actually up, and why not when it is not.
+     *
+     * This class is written to fail quietly — a blocked socket changes nothing about playback, so
+     * every error is logged at debug and swallowed. That is right for the nudges it was built for
+     * and wrong now that Live Data View rides on it: a screen whose socket never connects looks
+     * identical, from the CMS and from this box, to one that is connected and simply has nothing to
+     * say. Which is the whole reason live preview can work against a server on the dev machine and
+     * not against the deployed one — an HTTP-only path through a proxy that does not forward
+     * /socket.io/ still passes every heartbeat, so the screen shows Online throughout.
+     *
+     * Exposed rather than logged so the diagnostics overlay can put it on the wall, where whoever is
+     * standing in front of the screen can read it.
+     */
+    private val _connected = MutableStateFlow(false)
+    val connected: StateFlow<Boolean> get() = _connected.asStateFlow()
+
+    @Volatile
+    var lastError: String? = null
+        private set
+
+    /** Debug after the first: a box behind a blocking proxy would otherwise fill its log forever. */
+    private var errorsLogged = 0
 
     fun connect() {
         val screenId = store.screenId
@@ -72,9 +101,15 @@ class RealtimeChannel(
 
             client.on(Socket.EVENT_CONNECT) {
                 AppLog.i(TAG, "Push channel connected; watching screen $screenId")
+                _connected.value = true
+                lastError = null
+                errorsLogged = 0
                 // Re-joined on every connect, not just the first: a reconnect is a new socket
                 // server-side and it remembers no rooms.
                 runCatching { client.emit(EVENT_WATCH, JSONObject().put("screenId", screenId)) }
+                // Emits into the room while this screen was away are simply gone, so the queue has
+                // to be checked rather than waited on.
+                runCatching { onReconnected() }
             }
 
             client.on(EVENT_CONTENT_UPDATED) {
@@ -87,12 +122,25 @@ class RealtimeChannel(
                 runCatching { onCommandQueued() }
             }
 
-            client.on(Socket.EVENT_DISCONNECT) { AppLog.d(TAG, "Push channel disconnected") }
-            // Connection errors are expected and routine on these networks. Debug, not warn: a
-            // screen behind a proxy that blocks sockets would otherwise fill its log with a failure
-            // that changes nothing about how it behaves.
+            client.on(Socket.EVENT_DISCONNECT) {
+                AppLog.d(TAG, "Push channel disconnected")
+                _connected.value = false
+            }
+            // Connection errors are routine on these networks, so the log stays quiet after the
+            // first — but the FIRST one is now a warning, because "the socket has never once
+            // connected" is the answer to a question people otherwise spend an afternoon on.
             client.on(Socket.EVENT_CONNECT_ERROR) { args ->
-                AppLog.d(TAG, "Push channel unavailable: ${args.firstOrNull()}")
+                val reason = args.firstOrNull()?.toString() ?: "unknown"
+                _connected.value = false
+                lastError = reason
+                if (errorsLogged == 0) {
+                    AppLog.w(
+                        TAG,
+                        "Push channel could not connect to ${socketOrigin(baseUrl)}: $reason — " +
+                            "content nudges and live preview will not work until it does",
+                    )
+                }
+                errorsLogged++
             }
 
             socket = client
@@ -143,6 +191,7 @@ class RealtimeChannel(
             }
         }
         socket = null
+        _connected.value = false
     }
 
     /** Re-attach after pairing or unpairing, when the room to watch has changed. */

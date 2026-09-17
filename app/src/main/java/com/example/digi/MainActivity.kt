@@ -1,6 +1,8 @@
 package com.example.digi
 
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.RectF
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -27,6 +29,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -53,6 +56,7 @@ import com.example.digi.ui.diagnostics.DiagnosticsOverlay
 import com.example.digi.ui.pairing.PairingScreen
 import com.example.digi.ui.pairing.PairingViewModel
 import com.example.digi.ui.player.PlayerScreen
+import com.example.digi.ui.player.VideoSurfaces
 import com.example.digi.ui.player.PlayerViewModel
 import com.example.digi.ui.theme.DigiTheme
 import java.io.File
@@ -96,6 +100,12 @@ class MainActivity : ComponentActivity(), PlayerHost {
             DigiTheme {
                 val store = remember { DigiApp.graph(this).store }
                 val paired by store.paired.collectAsStateWithLifecycle()
+
+                // Immersive is decided by which screen is up (see goImmersive), so it has to be
+                // re-applied the moment that changes. Without this a box would sit on the pairing
+                // screen's visible status bar until something else happened to move window focus.
+                LaunchedEffect(paired) { goImmersive() }
+
                 val showDiagnostics by diagnosticsVisible.collectAsStateWithLifecycle()
 
                 val rotation by appRotation.collectAsStateWithLifecycle()
@@ -182,6 +192,18 @@ class MainActivity : ComponentActivity(), PlayerHost {
         PlayerHost.register(this)
         PlayerService.setForeground(true)
         goImmersive()
+        /*
+         * Re-asserted rather than trusted from onCreate.
+         *
+         * FLAG_KEEP_SCREEN_ON lives on the window, and the window does not necessarily survive
+         * everything this activity does: a configuration change the manifest does not claim, a
+         * recreate after the process is restored from a low-memory kill, or a vendor overlay that
+         * takes focus and hands it back can all leave a window whose flags are not the ones set at
+         * first launch. Re-adding a flag that is already set costs nothing, and the failure it
+         * prevents — a panel that sleeps hours later, for no reason anyone can reconstruct — is one
+         * of the more expensive ones to diagnose from a wall.
+         */
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
     override fun onPause() {
@@ -235,7 +257,26 @@ class MainActivity : ComponentActivity(), PlayerHost {
         }
     }
 
+    /**
+     * Full-screen, but not while somebody is pairing.
+     *
+     * IMMERSIVE_STICKY together with HIDE_NAVIGATION is what a wall panel needs and what a text
+     * field cannot survive on a good number of OEM boxes: raising the IME changes window focus,
+     * [onWindowFocusChanged] fires as it settles, this runs again, and re-hiding the system UI takes
+     * the keyboard down with it. The user sees a tap that does nothing, or a keyboard that flashes
+     * and vanishes — and whether it happens comes down to the vendor's window manager, which is why
+     * it struck some devices and not others.
+     *
+     * The player still gets immersive. The pairing screen is a commissioning tool used once, by
+     * somebody standing in front of the device, and a visible status bar there costs nothing.
+     */
     private fun goImmersive() {
+        if (!DigiApp.graph(this).store.paired.value) {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+            return
+        }
+
         @Suppress("DEPRECATION")
         window.decorView.systemUiVisibility = (
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
@@ -312,6 +353,11 @@ class MainActivity : ComponentActivity(), PlayerHost {
                 return@withContext null
             }
 
+            // The window copy has a hole where any SurfaceView is. Fill them in from the surfaces
+            // themselves — see overlayVideoSurfaces, and VideoSurfaces for why this is the emulator
+            // /device difference rather than a setting somebody forgot.
+            overlayVideoSurfaces(bitmap, targetWidth.toFloat() / sourceWidth, thread)
+
             // Compression is the slow part and needs no window, so it goes off the main thread — an
             // encode on a cheap SoC is comfortably long enough to drop frames, and at one live frame
             // every five seconds that would be visible on the wall.
@@ -338,6 +384,66 @@ class MainActivity : ComponentActivity(), PlayerHost {
             AppLog.e(TAG, "Screen capture failed", e)
             if (!reusable) runCatching { bitmap.recycle() }
             null
+        }
+    }
+
+    /**
+     * Draw each video surface into the window copy, at the place it occupies on screen.
+     *
+     * `PixelCopy.request(window, …)` reads the window's own surface, and a SurfaceView is not in it
+     * — it is composited behind the window, showing through a punched hole — so the window copy
+     * comes back with a black rectangle where the video is. An emulator usually hides this, because
+     * its host-GL compositor puts the SurfaceView's pixels into the window copy anyway; a real box
+     * with a hardware overlay does not. Same APK, same code path, opposite result.
+     *
+     * The SurfaceView overload of PixelCopy reads the right surface, so each one is copied on its
+     * own and drawn in. Costs one small copy per video zone, only while a capture is running, and
+     * leaves the surface type — and therefore playback — untouched.
+     *
+     * Drawn over the window copy rather than under it. That loses anything the UI draws ON TOP of a
+     * video zone (the slide dots, the download chip) from the screenshot, which is the lesser of the
+     * two errors: those are diagnostics, and the alternative is relying on the hole being
+     * transparent in the copy, which is exactly the vendor-specific behaviour that caused this.
+     *
+     * Failures are per-surface and silent by design: a zone caught mid-swap makes its own copy fail
+     * and the screenshot is still worth sending with the rest of the layout in it.
+     */
+    private suspend fun overlayVideoSurfaces(target: Bitmap, scale: Float, thread: HandlerThread) {
+        val surfaces = VideoSurfaces.capturable()
+        if (surfaces.isEmpty()) return
+
+        val canvas = Canvas(target)
+        val decorAt = IntArray(2).also { window.decorView.getLocationInWindow(it) }
+
+        for (surface in surfaces) {
+            val frame = runCatching {
+                Bitmap.createBitmap(surface.width, surface.height, Bitmap.Config.ARGB_8888)
+            }.getOrNull() ?: continue
+
+            val done = CompletableDeferred<Boolean>()
+            val requested = runCatching {
+                PixelCopy.request(
+                    surface,
+                    frame,
+                    { status -> done.complete(status == PixelCopy.SUCCESS) },
+                    Handler(thread.looper),
+                )
+            }.isSuccess
+
+            if (requested && done.await()) {
+                val at = IntArray(2).also { surface.getLocationInWindow(it) }
+                val left = (at[0] - decorAt[0]) * scale
+                val top = (at[1] - decorAt[1]) * scale
+                canvas.drawBitmap(
+                    frame,
+                    null,
+                    RectF(left, top, left + surface.width * scale, top + surface.height * scale),
+                    null,
+                )
+            } else {
+                AppLog.d(TAG, "Could not read a video surface for the capture; layout still captured")
+            }
+            frame.recycle()
         }
     }
 

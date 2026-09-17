@@ -51,16 +51,28 @@ object AppLog {
     fun i(tag: String, message: String) {
         Log.i(tag, message)
         record("I", tag, message, null)
+        // Breadcrumbs, not reports. Crashlytics attaches the recent ones to whatever crash follows,
+        // which is what turns a stack trace into a sequence of events leading to it.
+        FirebaseTelemetry.breadcrumb("I/$tag: $message")
     }
 
     fun w(tag: String, message: String, error: Throwable? = null) {
         Log.w(tag, message, error)
         record("W", tag, message, error?.toShortString())
+        FirebaseTelemetry.breadcrumb("W/$tag: $message")
     }
 
+    /**
+     * An error the app handled.
+     *
+     * Also reported to Crashlytics as a non-fatal, because on a wall-mounted unattended box these
+     * are the failures that never get noticed otherwise: nobody is watching, and the screen keeps
+     * showing something plausible while a download fails for the tenth time.
+     */
     fun e(tag: String, message: String, error: Throwable? = null) {
         Log.e(tag, message, error)
         record("E", tag, message, error?.toShortString())
+        FirebaseTelemetry.nonFatal(tag, message, error)
     }
 
     fun snapshot(): List<Entry> = synchronized(buffer) { buffer.toList() }

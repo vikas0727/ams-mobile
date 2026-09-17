@@ -2,6 +2,7 @@ package com.example.digi.data.repo
 
 import com.example.digi.core.AmsConstants
 import com.example.digi.core.AppLog
+import com.example.digi.core.FirebaseTelemetry
 import com.example.digi.core.ServerClock
 import com.example.digi.data.local.PlayerStore
 import com.example.digi.data.remote.ApiResult
@@ -160,6 +161,11 @@ class ContentRepository(
         // a shorter loop beats a blank screen, and the failure is surfaced separately.
         _plan.value = planBuilder.build(body)
         body.contentVersion?.let { store.contentVersion = it }
+        // What this screen is actually running, attached to any crash from here on. A renderer crash
+        // is usually about a specific file in a specific playlist, and this is what names it.
+        FirebaseTelemetry.setKey("playlist", _plan.value?.playlistName)
+        FirebaseTelemetry.setKey("content_version", (body.contentVersion ?: -1).toString())
+        FirebaseTelemetry.setKey("missing_assets", (_plan.value?.missingAssets ?: 0).toString())
         AppLog.i(
             TAG,
             "Synced ${body.contentSource} v${body.contentVersion}: " +

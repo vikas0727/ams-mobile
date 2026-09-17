@@ -2,6 +2,7 @@ package com.example.digi.data.repo
 
 import com.example.digi.core.AmsConstants
 import com.example.digi.core.AppLog
+import com.example.digi.core.FirebaseTelemetry
 import com.example.digi.core.ServerClock
 import com.example.digi.data.local.PlayerStore
 import com.example.digi.data.local.dao.EventLogDao
@@ -87,6 +88,26 @@ class EventReporter(
         playlist: String?,
         detail: JsonElement?,
     ) {
+        /*
+         * Analytics is reported BEFORE the capture gate, on purpose.
+         *
+         * The gate below exists so the CMS event table does not grow for screens nobody is watching
+         * — it is an operator's diagnostic switch, per screen. Fleet analytics is the opposite
+         * question: what do all the screens do, over weeks, when nobody is looking at any of them.
+         * Gating this on the same switch would mean the only data ever collected came from screens
+         * somebody was already debugging.
+         */
+        FirebaseTelemetry.event(
+            name = action ?: type,
+            params = buildMap {
+                put("type", type)
+                status?.let { put("status", it) }
+                action?.let { put("action", it) }
+                fileName?.let { put("file_name", it) }
+                playlist?.let { put("playlist", it) }
+            },
+        )
+
         // The gate, applied locally. Without this the table grows for every screen in the fleet
         // whether or not anyone is watching.
         if (!store.realtimeCaptureEnabled) return

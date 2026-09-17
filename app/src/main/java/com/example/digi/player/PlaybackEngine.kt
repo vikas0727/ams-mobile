@@ -54,7 +54,11 @@ object PlaybackEngine {
      *                plan was adopted for anything else
      */
     fun frameAt(plan: PlaybackPlan, nowMs: Long, baseMs: Long): Frame? {
-        val layouts = plan.layouts.filter { it.zones.any { z -> z.slides.isNotEmpty() } }
+        // Layouts that can actually be drawn — see PlanSlide.isRenderable. A layout whose every
+        // slide is still waiting on a download has nothing to contribute but its duration, and
+        // keeping it in the rotation spends that duration showing black with no explanation.
+        // Dropping it here is what lets frameAt return null and the status screen say what is wrong.
+        val layouts = plan.layouts.filter { it.zones.any { z -> z.slides.any { s -> s.isRenderable } } }
         if (layouts.isEmpty()) return null
 
         val cycleMs = layouts.sumOf { it.durationMs }.coerceAtLeast(1L)
@@ -152,7 +156,7 @@ object PlaybackEngine {
     private fun orderedSlides(zone: PlanZone, shuffle: Boolean, cycleIndex: Long): List<PlanSlide> {
         // Assets that have not downloaded yet are skipped rather than rendered as a gap: a blank
         // beat looks like a fault, a slightly shorter loop does not.
-        val playable = zone.slides.filter { it.isPlayable || it.isBlank }
+        val playable = zone.slides.filter { it.isRenderable }
         if (!shuffle || playable.size < 2) return playable
         return playable.shuffled(Random(cycleIndex * 31 + zone.key.hashCode()))
     }

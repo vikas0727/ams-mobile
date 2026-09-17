@@ -1,6 +1,7 @@
 package com.example.digi.ui.player
 
 import android.view.LayoutInflater
+import android.view.SurfaceView
 import android.view.ViewGroup
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
@@ -390,6 +391,9 @@ private fun VideoLayer(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                     )
                     this.player = player
+                    // On the SurfaceView path the video is not in the window, so a screenshot has
+                    // to read this surface directly. See VideoSurfaces.
+                    (videoSurfaceView as? SurfaceView)?.let { VideoSurfaces.register(it) }
                 }
             },
             update = { view ->
@@ -402,7 +406,10 @@ private fun VideoLayer(
             // from the view being thrown away also unregisters its listener; Media3 ignores the
             // surface clear when another view has already taken over, so this cannot blank the
             // incoming one whichever order Compose disposes and creates in.
-            onRelease = { view -> view.player = null },
+            onRelease = { view ->
+                (view.videoSurfaceView as? SurfaceView)?.let { VideoSurfaces.unregister(it) }
+                view.player = null
+            },
             modifier = Modifier
                 .fillMaxSize()
                 // Hidden, not removed, while an image is up — the surface and its decoder survive.

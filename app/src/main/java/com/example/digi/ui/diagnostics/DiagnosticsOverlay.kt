@@ -32,6 +32,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.digi.core.AppLog
 import com.example.digi.core.DigiApp
+import com.example.digi.core.FirebaseTelemetry
 import com.example.digi.core.ServerClock
 import com.example.digi.data.repo.ContentRepository
 import com.example.digi.service.PlayerService
@@ -71,6 +72,7 @@ fun DiagnosticsOverlay(
     val service by PlayerService.serviceState.collectAsStateWithLifecycle()
     val plan by graph.content.plan.collectAsStateWithLifecycle()
     val download by graph.content.downloadState.collectAsStateWithLifecycle()
+    val pushConnected by graph.realtime.connected.collectAsStateWithLifecycle()
     val logs by AppLog.entries.collectAsStateWithLifecycle()
 
     // Queue depths and cache size need a database round trip, so they refresh on their own slow
@@ -113,6 +115,36 @@ fun DiagnosticsOverlay(
                     if (service.online) Good else Bad,
                 )
                 Field("Last beat", formatAge(graph.heartbeat.secondsSinceLastSuccess()))
+                /*
+                 * The push socket, stated plainly.
+                 *
+                 * Heartbeats are HTTP and the socket is a WebSocket upgrade on the same host, so a
+                 * proxy that forwards one and not the other leaves a screen that reports Online all
+                 * day and never sends a live-preview packet. Nothing else on this box would tell
+                 * you: the channel is built to fail silently, which is right for playback and
+                 * useless for working out why Live Data View is blank.
+                 */
+                Field(
+                    "Push socket",
+                    if (pushConnected) "connected" else "DOWN — ${graph.realtime.lastError ?: "never connected"}",
+                    if (pushConnected) Good else Bad,
+                )
+                // Three states, not two: a build with no google-services.json is a deliberate
+                // choice, not a fault, and reading "not reporting" on one would send somebody
+                // looking for a problem that is not there.
+                Field(
+                    "Crash reporting",
+                    when {
+                        FirebaseTelemetry.available -> "active"
+                        !FirebaseTelemetry.configuredAtBuildTime -> "not built in"
+                        else -> "configured but INACTIVE"
+                    },
+                    when {
+                        FirebaseTelemetry.available -> Good
+                        !FirebaseTelemetry.configuredAtBuildTime -> Label
+                        else -> Bad
+                    },
+                )
                 Field(
                     "Server view",
                     // The CMS marks a screen offline after 180s without a beat. Saying so plainly

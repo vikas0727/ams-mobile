@@ -77,6 +77,9 @@ class PlayerService : Service() {
     @Volatile
     private var beatNow = false
 
+    /** When the keep-awake settings were last re-asserted — see [assertScreenAwake]. */
+    private var lastAwakeAssertAt = 0L
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -152,9 +155,24 @@ class PlayerService : Service() {
 
             runCatching { tick() }.onFailure { AppLog.e(TAG, "Tick failed", it) }
 
+            /*
+             * Sleep until the next thing is due, not a flat tick.
+             *
+             * A fixed TICK_MS wait quantises every interval up to the next multiple of ten seconds:
+             * a 15s cadence beat at 20s, because the pass that would have beaten at 15 was asleep
+             * until 20. That is invisible at 60s and half again as slow at 15, which is exactly the
+             * cadence a screen with no push channel depends on.
+             *
+             * Never longer than TICK_MS, because `tick()` — schedules, brightness — still has to run
+             * on its own beat regardless of when the next heartbeat is.
+             */
+            val untilBeat = (beatIntervalMs() - (SystemClock.elapsedRealtime() - lastBeatAt))
+                .coerceAtLeast(0L)
+            val wait = minOf(TICK_MS, untilBeat).coerceAtLeast(MIN_LOOP_WAIT_MS)
+
             // A push nudge short-circuits the wait, so a content change that arrives over the
             // socket is acted on in the same second rather than at the next tick boundary.
-            withTimeoutOrNull(TICK_MS) { nudges.receive() }
+            withTimeoutOrNull(wait) { nudges.receive() }
         }
     }
 
@@ -185,7 +203,29 @@ class PlayerService : Service() {
     private fun beatIntervalMs(): Long {
         val server = graph.heartbeat.intervalSeconds() * 1000L
         val idle = graph.content.plan.value?.hasContent != true
-        return if (idle) minOf(server, IDLE_BEAT_MS) else server
+
+        /*
+         * The server's interval assumes the push channel is doing the urgent work.
+         *
+         * A minute between beats is only reasonable because a settings change or a new playlist
+         * arrives as a socket nudge within the second and short-circuits the wait. On a screen whose
+         * socket never connects — a proxy that forwards HTTP and not the WebSocket upgrade, which is
+         * invisible from here because the heartbeats themselves keep working — that assumption is
+         * simply false, and every change from the portal waits out the full interval instead. That
+         * is the "settings take ages to apply" report, and the screen looks perfectly healthy while
+         * it happens.
+         *
+         * So polling covers for the push when the push is not there. Four beats a minute instead of
+         * one, on the screens that need it and not on the rest. Uptime is unaffected: the server
+         * records heartbeat MINUTES with $addToSet, so beating four times inside one minute still
+         * records that one minute.
+         */
+        val pushDown = !graph.realtime.connected.value
+
+        var interval = server
+        if (idle) interval = minOf(interval, IDLE_BEAT_MS)
+        if (pushDown) interval = minOf(interval, NO_PUSH_BEAT_MS)
+        return interval
     }
 
     /**
@@ -197,6 +237,16 @@ class PlayerService : Service() {
      */
     private suspend fun startUp() {
         graph.content.restoreCachedPlan()
+
+        /*
+         * Before anything that needs the network, and regardless of whether this screen is paired.
+         *
+         * An unpaired box sitting on the pairing screen must not go to sleep either — an engineer
+         * who walks away to fetch the code from the portal should not come back to a dark panel and
+         * assume the box is dead.
+         */
+        val awake = DeviceController.keepScreenAwake(this)
+        if (awake.success) AppLog.i(TAG, awake.detail) else AppLog.w(TAG, awake.detail)
 
         if (!graph.pairing.verify()) {
             AppLog.w(TAG, "Not paired (or the token was rejected) — the UI will ask for a code")
@@ -239,6 +289,7 @@ class PlayerService : Service() {
             .onFailure { AppLog.w(TAG, "Heartbeat backfill failed", it) }
 
         applySettings(beat.settings)
+        assertScreenAwake()
 
         if (beat.captureJustEnabled) {
             // Put a line in the Logs tab immediately. An operator who has just switched Live Data
@@ -274,6 +325,32 @@ class PlayerService : Service() {
         if (graph.commandExecutor.consumeRestart()) {
             DeviceController.restartApp(this)
         }
+    }
+
+    /**
+     * Put the sleep timeout back if something has moved it.
+     *
+     * Set once at start-up and then left alone would be enough if nothing else ever touched it, but
+     * a system update or somebody in the device's own Settings will restore a fifteen-minute
+     * timeout, and the panel then darkens weeks later with no apparent cause. Checked on the
+     * heartbeat because that is a timer that already exists; the read is a content-provider lookup
+     * and the write only happens when it actually drifted.
+     *
+     * Rate-limited regardless, so a box that reports drift but refuses the write does not attempt
+     * it on every beat for the rest of its life.
+     */
+    private suspend fun assertScreenAwake() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastAwakeAssertAt < AWAKE_REASSERT_MS) return
+        if (!DeviceController.screenTimeoutNeedsReapply(this)) return
+
+        lastAwakeAssertAt = now
+        val outcome = DeviceController.keepScreenAwake(this)
+        AppLog.w(TAG, "Screen sleep timeout had been reset — ${outcome.detail}")
+        graph.events.appEvent(
+            action = AmsConstants.LogAction.SETTINGS_APPLIED,
+            status = outcome.detail,
+        )
     }
 
     private suspend fun drainCommands() {
@@ -523,8 +600,23 @@ class PlayerService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val TICK_MS = 10_000L
 
+        /** A floor on the loop's wait, so a miscomputed interval can never spin it. */
+        private const val MIN_LOOP_WAIT_MS = 500L
+
+        /** How rarely the keep-awake settings are re-asserted — see [assertScreenAwake]. */
+        private const val AWAKE_REASSERT_MS = 5 * 60 * 1000L
+
         /** Heartbeat cadence while a screen has no content — see [beatIntervalMs]. */
         private const val IDLE_BEAT_MS = 15_000L
+
+        /**
+         * Heartbeat cadence while the push channel is down — see [beatIntervalMs].
+         *
+         * Fifteen seconds is the compromise: fast enough that a settings change from the portal
+         * feels prompt rather than forgotten, slow enough that a whole fleet stuck on polling is
+         * four requests a minute per screen and not a load problem.
+         */
+        private const val NO_PUSH_BEAT_MS = 15_000L
 
         /** How often a watched screen reports its position. Two seconds rather than five: this is
          *  a few hundred bytes, and the preview corrects drift on each one, so a tighter cadence
