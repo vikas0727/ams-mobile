@@ -400,7 +400,34 @@ object DeviceController {
             SU_AWAKE_COMMANDS.forEach { shell.write(it + "\n") }
             shell.write("exit\n")
         }
-        process.waitFor() == 0
+
+        /*
+         * Bounded, because an unbounded waitFor() here took a fleet down.
+         *
+         * On a box with a superuser manager installed, `su` blocks on a prompt that nobody is
+         * standing in front of a wall panel to answer, and the first version of this waited on that
+         * forever from the player's own start-up path. Five seconds is far longer than three
+         * `settings put` calls need and short enough that a hung shell is just a refused rung.
+         */
+        val finished = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            process.waitFor(SU_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+        } else {
+            // No timed waitFor before API 26. Poll exitValue, which throws while still running.
+            var done = false
+            val until = System.currentTimeMillis() + SU_TIMEOUT_SECONDS * 1000
+            while (System.currentTimeMillis() < until) {
+                if (runCatching { process.exitValue() }.isSuccess) { done = true; break }
+                Thread.sleep(100)
+            }
+            done
+        }
+
+        if (!finished) {
+            runCatching { process.destroy() }
+            AppLog.d(TAG, "su did not return within ${SU_TIMEOUT_SECONDS}s — giving up on that rung")
+            return@runCatching false
+        }
+        process.exitValue() == 0
     }.getOrDefault(false)
 
     /** Pulls the player back to the front — the watchdog behind `keepOnTop`. */
@@ -433,6 +460,9 @@ object DeviceController {
 
     /** `Settings.Secure.SCREENSAVER_ENABLED` is @hide; the key itself is public API in all but name. */
     private const val KEY_SCREENSAVER_ENABLED = "screensaver_enabled"
+
+    /** How long a root shell gets before it is treated as unavailable — see runSuSettings. */
+    private const val SU_TIMEOUT_SECONDS = 5L
 
     /**
      * The keep-awake settings, as a root shell would write them.

@@ -35,6 +35,7 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
 
 /**
  * The device loop, as a foreground service.
@@ -77,7 +78,7 @@ class PlayerService : Service() {
     @Volatile
     private var beatNow = false
 
-    /** When the keep-awake settings were last re-asserted — see [assertScreenAwake]. */
+    /** When the keep-awake settings were last re-asserted — see [keepAwakeLoop]. */
     private var lastAwakeAssertAt = 0L
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -102,6 +103,8 @@ class PlayerService : Service() {
             loopJob = scope.launch { runLoop() }
             scope.launch { watchNetwork() }
             scope.launch { streamPlaybackState() }
+            // Deliberately its own job rather than a step in startUp — see keepAwakeLoop.
+            scope.launch { keepAwakeLoop() }
         }
         // STICKY so that a system kill under memory pressure brings the loop back by itself. There
         // is nobody standing at the box to restart it.
@@ -238,16 +241,6 @@ class PlayerService : Service() {
     private suspend fun startUp() {
         graph.content.restoreCachedPlan()
 
-        /*
-         * Before anything that needs the network, and regardless of whether this screen is paired.
-         *
-         * An unpaired box sitting on the pairing screen must not go to sleep either — an engineer
-         * who walks away to fetch the code from the portal should not come back to a dark panel and
-         * assume the box is dead.
-         */
-        val awake = DeviceController.keepScreenAwake(this)
-        if (awake.success) AppLog.i(TAG, awake.detail) else AppLog.w(TAG, awake.detail)
-
         if (!graph.pairing.verify()) {
             AppLog.w(TAG, "Not paired (or the token was rejected) — the UI will ask for a code")
             return
@@ -289,7 +282,6 @@ class PlayerService : Service() {
             .onFailure { AppLog.w(TAG, "Heartbeat backfill failed", it) }
 
         applySettings(beat.settings)
-        assertScreenAwake()
 
         if (beat.captureJustEnabled) {
             // Put a line in the Logs tab immediately. An operator who has just switched Live Data
@@ -328,29 +320,31 @@ class PlayerService : Service() {
     }
 
     /**
-     * Put the sleep timeout back if something has moved it.
+     * Keep the panel awake, entirely off the playback loop.
      *
-     * Set once at start-up and then left alone would be enough if nothing else ever touched it, but
-     * a system update or somebody in the device's own Settings will restore a fifteen-minute
-     * timeout, and the panel then darkens weeks later with no apparent cause. Checked on the
-     * heartbeat because that is a timer that already exists; the read is a content-provider lookup
-     * and the write only happens when it actually drifted.
+     * This ran inline in [startUp] in its first version, and that was a bad mistake: it writes
+     * system settings and can shell out to `su`, all blocking IO, on the one coroutine that syncs
+     * content and heartbeats. On a box where `su` exists but never returns — it waits on a
+     * superuser prompt nobody is there to answer — start-up never got as far as the first sync. The
+     * screen stayed black, nothing was reported, and every symptom pointed at content or the socket
+     * rather than at a screen-timeout tweak.
      *
-     * Rate-limited regardless, so a box that reports drift but refuses the write does not attempt
-     * it on every beat for the rest of its life.
+     * So: its own coroutine, on the IO dispatcher, started after the loop is already running and
+     * never awaited. It re-checks on a slow timer of its own rather than riding the heartbeat, so
+     * nothing about playback can ever wait on it again. The worst case is now a panel that sleeps.
      */
-    private suspend fun assertScreenAwake() {
-        val now = SystemClock.elapsedRealtime()
-        if (now - lastAwakeAssertAt < AWAKE_REASSERT_MS) return
-        if (!DeviceController.screenTimeoutNeedsReapply(this)) return
+    private suspend fun keepAwakeLoop() {
+        while (scope.isActive) {
+            runCatching {
+                if (lastAwakeAssertAt == 0L || DeviceController.screenTimeoutNeedsReapply(this)) {
+                    val outcome = withContext(Dispatchers.IO) { DeviceController.keepScreenAwake(this@PlayerService) }
+                    lastAwakeAssertAt = SystemClock.elapsedRealtime()
+                    if (outcome.success) AppLog.i(TAG, outcome.detail) else AppLog.w(TAG, outcome.detail)
+                }
+            }.onFailure { AppLog.w(TAG, "Keep-awake pass failed", it) }
 
-        lastAwakeAssertAt = now
-        val outcome = DeviceController.keepScreenAwake(this)
-        AppLog.w(TAG, "Screen sleep timeout had been reset — ${outcome.detail}")
-        graph.events.appEvent(
-            action = AmsConstants.LogAction.SETTINGS_APPLIED,
-            status = outcome.detail,
-        )
+            delay(AWAKE_REASSERT_MS)
+        }
     }
 
     private suspend fun drainCommands() {
@@ -603,7 +597,7 @@ class PlayerService : Service() {
         /** A floor on the loop's wait, so a miscomputed interval can never spin it. */
         private const val MIN_LOOP_WAIT_MS = 500L
 
-        /** How rarely the keep-awake settings are re-asserted — see [assertScreenAwake]. */
+        /** How rarely the keep-awake settings are re-asserted — see [keepAwakeLoop]. */
         private const val AWAKE_REASSERT_MS = 5 * 60 * 1000L
 
         /** Heartbeat cadence while a screen has no content — see [beatIntervalMs]. */
