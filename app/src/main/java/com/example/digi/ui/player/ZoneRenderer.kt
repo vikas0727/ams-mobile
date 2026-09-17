@@ -1,7 +1,6 @@
 package com.example.digi.ui.player
 
 import android.view.LayoutInflater
-import android.view.SurfaceView
 import android.view.ViewGroup
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
@@ -358,7 +357,17 @@ private fun VideoLayer(
      */
     val captureEnabled by DigiApp.graph(context).store.realtimeCapture.collectAsStateWithLifecycle()
     val mixesImages = remember(slides) { slides.any { !it.isVideo && it.isPlayable } }
-    val needsTextureView = captureEnabled || mixesImages
+    /*
+     * Third reason, and the one that made SCREENSHOT work at last: a capture is in progress.
+     *
+     * A one-off screenshot never turned this on, so an ordinary video zone was captured on the
+     * SurfaceView path and came back as a black rectangle. Reading that surface directly is the
+     * documented answer and does not work on these boxes — it returns nothing and disturbs the live
+     * picture — whereas a TextureView demonstrably works, because that is what every correct
+     * screenshot taken here so far has quietly been using. See VideoSurfaces.
+     */
+    val capturing by VideoSurfaces.textureRequired.collectAsStateWithLifecycle()
+    val needsTextureView = captureEnabled || mixesImages || capturing
 
     // `key` rather than a branch inside the factory: surface_type is read at inflation and cannot be
     // changed afterwards, so flipping it means building a new PlayerView. The ExoPlayer itself is
@@ -391,10 +400,6 @@ private fun VideoLayer(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                     )
                     this.player = player
-                    // On the SurfaceView path the video is not in the window, so a screenshot has
-                    // to read this surface directly. Registering it is all that costs — whether the
-                    // copy is used at all is decided at capture time. See VideoSurfaces.
-                    (videoSurfaceView as? SurfaceView)?.let { VideoSurfaces.register(it) }
                 }
             },
             update = { view ->
@@ -407,10 +412,7 @@ private fun VideoLayer(
             // from the view being thrown away also unregisters its listener; Media3 ignores the
             // surface clear when another view has already taken over, so this cannot blank the
             // incoming one whichever order Compose disposes and creates in.
-            onRelease = { view ->
-                (view.videoSurfaceView as? SurfaceView)?.let { VideoSurfaces.unregister(it) }
-                view.player = null
-            },
+            onRelease = { view -> view.player = null },
             modifier = Modifier
                 .fillMaxSize()
                 // Hidden, not removed, while an image is up — the surface and its decoder survive.

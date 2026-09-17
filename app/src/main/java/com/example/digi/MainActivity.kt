@@ -1,8 +1,6 @@
 package com.example.digi
 
 import android.graphics.Bitmap
-import android.graphics.RectF
-import android.graphics.Canvas
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -66,6 +64,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.delay
 
 /**
  * The only Activity: pairing screen, or the wall.
@@ -340,21 +339,42 @@ class MainActivity : ComponentActivity(), PlayerHost {
             captureThread = it
         }
 
-        val copied = CompletableDeferred<Boolean>()
         try {
-            // srcRect null = the whole window, scaled into `bitmap`.
-            PixelCopy.request(window, null, bitmap, { status ->
-                copied.complete(status == PixelCopy.SUCCESS)
-            }, Handler(thread.looper))
+            /*
+             * Ask for a capturable surface, then wait for it to actually have a frame in it.
+             *
+             * VideoSurfaces.forCapture flips the renderer onto a TextureView, which is in the window
+             * and therefore in this copy; a SurfaceView is not, which is why a plain screenshot of a
+             * video zone used to be a black rectangle. The flag is cleared on the way out, including
+             * if this throws, so the expensive surface is never left on.
+             *
+             * Retried rather than slept-on-a-guess, because the wait is for a surface to be rebuilt
+             * and a decoder to hand it a frame, and how long that takes varies by box. Re-copying is
+             * cheap; guessing a settle time that is too short on the slowest hardware in the fleet
+             * gives exactly the black picture this is here to fix. A screen already on a TextureView
+             * — anything with Live Data View on — is satisfied by the first pass.
+             */
+            val copiedSomething = VideoSurfaces.forCapture {
+                var got = false
+                repeat(CAPTURE_ATTEMPTS) { attempt ->
+                    if (!got) {
+                        delay(CAPTURE_SETTLE_MS)
+                        if (copyWindowInto(bitmap, thread)) {
+                            // A blank copy this early is almost always the new surface not having
+                            // rendered yet. A genuinely black screen costs the full retry budget and
+                            // is then captured as it is, which is correct and barely over a second.
+                            got = hasVisibleContent(bitmap) || attempt == CAPTURE_ATTEMPTS - 1
+                        }
+                    }
+                }
+                got
+            }
 
-            if (!copied.await()) {
+            if (!copiedSomething) {
                 AppLog.w(TAG, "PixelCopy failed")
                 if (!reusable) bitmap.recycle()
                 return@withContext null
             }
-
-            // Fill in any video that the window copy missed — see overlayVideoSurfaces.
-            overlayVideoSurfaces(bitmap, targetWidth.toFloat() / sourceWidth, thread)
 
             // Compression is the slow part and needs no window, so it goes off the main thread — an
             // encode on a cheap SoC is comfortably long enough to drop frames, and at one live frame
@@ -386,72 +406,21 @@ class MainActivity : ComponentActivity(), PlayerHost {
     }
 
     /**
-     * Draw each video surface into the window copy — but only when it has something to add.
+     * One window copy into [target]. True when PixelCopy reported success.
      *
-     * `PixelCopy.request(window, …)` reads the window's own surface. A SurfaceView is not part of
-     * it: it is a separate surface the display composites behind the window, showing through a hole
-     * punched in it. So a window copy of a screen playing video through a SurfaceView comes back
-     * with a black rectangle where the picture is, which is the black layer over otherwise-correct
-     * screenshots. It does not happen while Live Data View is on, because the renderer switches that
-     * zone to a TextureView — which IS in the window — and that is why this looked fine for so long.
-     *
-     * ## The guard, which is the important part
-     *
-     * An earlier version of this drew the second copy unconditionally, and on hardware where the
-     * per-surface read also came back empty it painted black over screenshots that had been
-     * perfectly good. Compositing something over a correct picture on the assumption that it must be
-     * better is exactly the mistake that caused, rather than fixed, a black screenshot.
-     *
-     * So the copy has to prove it has content before it is used. If the read fails, or comes back
-     * blank, the window copy is left exactly as it was — this can add the video back, and it cannot
-     * take anything away. A genuinely black frame is skipped too, which costs nothing: the window
-     * copy is black there as well.
-     *
-     * Nothing about playback changes — no surface swap, no blink, no decoder churn.
+     * Split out because the capture retries: the copy is the only part worth repeating while a
+     * rebuilt surface catches up, and everything around it — the bitmap, the handler thread — is
+     * set up once and reused across attempts.
      */
-    private suspend fun overlayVideoSurfaces(target: Bitmap, scale: Float, thread: HandlerThread) {
-        val surfaces = VideoSurfaces.capturable()
-        if (surfaces.isEmpty()) return
-
-        val canvas = Canvas(target)
-        val decorAt = IntArray(2).also { window.decorView.getLocationInWindow(it) }
-
-        for (surface in surfaces) {
-            val frame = runCatching {
-                Bitmap.createBitmap(surface.width, surface.height, Bitmap.Config.ARGB_8888)
-            }.getOrNull() ?: continue
-
-            val done = CompletableDeferred<Boolean>()
-            val requested = runCatching {
-                PixelCopy.request(
-                    surface,
-                    frame,
-                    { status -> done.complete(status == PixelCopy.SUCCESS) },
-                    Handler(thread.looper),
-                )
-            }.isSuccess
-
-            when {
-                !requested || !done.await() ->
-                    AppLog.d(TAG, "Could not read a video surface for the capture; window copy kept")
-
-                !hasVisibleContent(frame) ->
-                    AppLog.d(TAG, "Video surface copy came back blank; window copy kept")
-
-                else -> {
-                    val at = IntArray(2).also { surface.getLocationInWindow(it) }
-                    val left = (at[0] - decorAt[0]) * scale
-                    val top = (at[1] - decorAt[1]) * scale
-                    canvas.drawBitmap(
-                        frame,
-                        null,
-                        RectF(left, top, left + surface.width * scale, top + surface.height * scale),
-                        null,
-                    )
-                }
-            }
-            frame.recycle()
-        }
+    private suspend fun copyWindowInto(target: Bitmap, thread: HandlerThread): Boolean {
+        val copied = CompletableDeferred<Boolean>()
+        return runCatching {
+            // srcRect null = the whole window, scaled into `target`.
+            PixelCopy.request(window, null, target, { status ->
+                copied.complete(status == PixelCopy.SUCCESS)
+            }, Handler(thread.looper))
+            copied.await()
+        }.getOrDefault(false)
     }
 
     /**
@@ -526,6 +495,17 @@ class MainActivity : ComponentActivity(), PlayerHost {
 
     private companion object {
         const val TAG = "MainActivity"
+
+        /**
+         * How many times a capture re-copies while waiting for the TextureView to have a frame.
+         *
+         * Six at 250ms is a second and a half of patience. Long enough for the slowest box in the
+         * fleet to rebuild a surface and decode into it; short enough that a screen which is
+         * genuinely black — blanked by a schedule, or between clips — is captured as it is rather
+         * than leaving an operator waiting on a spinner.
+         */
+        const val CAPTURE_ATTEMPTS = 6
+        const val CAPTURE_SETTLE_MS = 250L
 
         /** Grid density for [hasVisibleContent] — 24 x 24 samples across the surface. */
         const val SAMPLE_STEPS = 24

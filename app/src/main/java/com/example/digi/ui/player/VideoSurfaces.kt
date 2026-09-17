@@ -1,59 +1,55 @@
 package com.example.digi.ui.player
 
-import android.view.SurfaceView
-import java.util.concurrent.CopyOnWriteArrayList
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * The video SurfaceViews currently on screen, so a screenshot can find them.
+ * Makes the video capturable for as long as a screenshot takes, and no longer.
  *
- * ## Why a registry is needed at all
+ * ## Why not just read the surface
  *
- * `PixelCopy.request(window, …)` reads the window's own surface. A SurfaceView is not part of it —
- * it is a separate surface that the display composites behind the window, showing through a hole
- * punched in it. So a window copy of a screen playing video returns everything except the video.
+ * `PixelCopy.request(window, …)` reads the window's own surface, and a SurfaceView is not in it — it
+ * is composited behind the window, showing through a punched hole — so a window copy of a zone
+ * playing through a SurfaceView has a black rectangle where the video is.
  *
- * That is exactly the emulator/device split. An emulator composites through SwiftShader or a host
- * GL path where the SurfaceView's content generally does land in the window copy, so a screenshot
- * taken on an emulator looks complete and the same code on a real box comes back with a black
- * rectangle where the content was.
+ * The obvious answer is PixelCopy's SurfaceView overload, reading that surface directly. It was
+ * tried twice here and does not work on this fleet's hardware: the copy comes back empty, and worse,
+ * asking for it disturbs the live surface — the panel itself went black, not only the screenshot.
+ * An API that is correct in the documentation and wrong on the device in front of you is wrong.
  *
- * The renderer already switches a zone to a TextureView — which IS in the window — when Live Data
- * View is on. A one-off SCREENSHOT command does not turn that on, and should not have to: flipping
- * the surface type rebuilds the PlayerView and blinks the video on the wall, which is a poor trade
- * for a screenshot nobody standing there asked to see interrupted.
+ * ## What is actually known to work
  *
- * So instead the capture reads each video surface directly — `PixelCopy` has a SurfaceView overload
- * that goes to the right surface — and draws the result into the window copy. Nothing about
- * playback changes, and the screenshot is correct whichever surface type the zone happens to be on.
+ * A TextureView IS part of the window, so a window copy contains it. That is not a theory about this
+ * fleet — it is the observed behaviour: screenshots came out correct for weeks, in every case where
+ * Live Data View happened to be on, because that switches the zone to a TextureView for exactly this
+ * reason. The mechanism was already proven; it was just never turned on for a plain screenshot.
  *
- * ## Lifetime
- *
- * Registered when a zone's PlayerView is created and removed when it is released, both from the
- * Compose main thread. Reads come from the capture coroutine, hence the copy-on-write list: the set
- * is tiny (one entry per video zone) and written a handful of times per playlist change.
+ * So a capture asks for one, waits for it, and gives it back. The cost is a brief blink on the wall
+ * while the surface is rebuilt, which is the honest price of a correct screenshot and is paid only
+ * when an operator asks for one. A screen already on a TextureView — anything with Live Data View on,
+ * or a zone mixing images with video — pays nothing at all, because the flag is already satisfied.
  */
 object VideoSurfaces {
 
-    private val surfaces = CopyOnWriteArrayList<SurfaceView>()
+    private val _textureRequired = MutableStateFlow(false)
 
-    fun register(view: SurfaceView) {
-        if (!surfaces.contains(view)) surfaces.add(view)
-    }
-
-    fun unregister(view: SurfaceView) {
-        surfaces.remove(view)
-    }
+    /** Collected by the renderer; true means "use a TextureView even if you would rather not". */
+    val textureRequired: StateFlow<Boolean> get() = _textureRequired.asStateFlow()
 
     /**
-     * Those worth trying to copy: attached, laid out, and with a live surface.
+     * Run [block] with the video forced onto a capturable surface.
      *
-     * A detached or zero-sized view makes PixelCopy throw rather than fail politely, and a zone
-     * mid-swap can briefly be either.
+     * The flag is cleared in a `finally` so a failed or cancelled capture cannot strand the fleet on
+     * TextureViews — that is the expensive surface, and leaving it on permanently is the performance
+     * regression this whole mechanism exists to avoid.
      */
-    fun capturable(): List<SurfaceView> = surfaces.filter { view ->
-        view.isAttachedToWindow &&
-            view.width > 0 &&
-            view.height > 0 &&
-            view.holder.surface?.isValid == true
+    suspend fun <T> forCapture(block: suspend () -> T): T {
+        _textureRequired.value = true
+        return try {
+            block()
+        } finally {
+            _textureRequired.value = false
+        }
     }
 }
