@@ -318,7 +318,13 @@ object DeviceController {
 
         // 2. Screen saver and stay-on-while-charging. Both are privileged writes that throw
         //    SecurityException on an ordinary install, which is expected rather than exceptional.
-        if (putSecureInt(context, Settings.Secure.SCREENSAVER_ENABLED, 0)) {
+        //
+        //    The key is a string literal because `Settings.Secure.SCREENSAVER_ENABLED` is @hide —
+        //    it exists in the framework and is absent from the SDK, so referring to the constant
+        //    does not compile. The underlying key name has been "screensaver_enabled" since
+        //    daydream landed in API 17 and is what every shell `settings put secure` invocation
+        //    uses, so the literal is the stable thing here, not a shortcut around a missing import.
+        if (putSecureInt(context, KEY_SCREENSAVER_ENABLED, 0)) {
             applied += "screen saver off"
         } else {
             refused += "screen saver"
@@ -424,6 +430,9 @@ object DeviceController {
 
     /** Below half an hour, a timeout is something to correct rather than a choice to respect. */
     private const val MIN_ACCEPTABLE_TIMEOUT_MS = 30 * 60 * 1000
+
+    /** `Settings.Secure.SCREENSAVER_ENABLED` is @hide; the key itself is public API in all but name. */
+    private const val KEY_SCREENSAVER_ENABLED = "screensaver_enabled"
 
     /**
      * The keep-awake settings, as a root shell would write them.
