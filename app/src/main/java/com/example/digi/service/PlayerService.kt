@@ -482,7 +482,28 @@ class PlayerService : Service() {
 
             runCatching {
                 val host = PlayerHost.current()
-                val state = host?.playbackState()
+
+                /*
+                 * No player UI, no report.
+                 *
+                 * This used to emit a packet with playing=false whenever the host was missing, on
+                 * the reasoning that "blanked" and "the UI is not in the foreground" are the same
+                 * fact to an operator. They are not, and the difference is the whole value of this
+                 * panel: a packet arriving every two seconds is the CMS's evidence that the player
+                 * is ALIVE. Sending one after the app has been killed says "I am here and nothing
+                 * is on the glass", which is a claim a dead app is in no position to make — and the
+                 * preview went on playing against it, badged PAUSED, while the box showed nothing.
+                 *
+                 * Staying silent lets the server's ten-second TTL lapse, and the CMS says the screen
+                 * is not reporting, which is exactly what has happened. A momentary gap — an
+                 * Activity being recreated — is shorter than the TTL and passes unnoticed.
+                 */
+                if (host == null) {
+                    AppLog.d(TAG, "No player UI attached — not reporting a playback position")
+                    return@runCatching
+                }
+
+                val state = host.playbackState()
                 val payload = JSONObject()
                     .put("mediaId", state?.mediaId ?: JSONObject.NULL)
                     .put("name", state?.name ?: JSONObject.NULL)
@@ -490,8 +511,10 @@ class PlayerService : Service() {
                     .put("positionMs", state?.positionMs ?: 0L)
                     .put("slideIndex", state?.slideIndex ?: -1)
                     .put("durationMs", state?.durationMs ?: 0L)
-                    // False covers both "blanked" and "the UI is not in the foreground at all",
-                    // which from the operator's side are the same fact: nothing is on the glass.
+                    // The UI is attached (checked above), so false here means one thing only: the
+                    // player is on screen and deliberately showing nothing — blanked by a schedule,
+                    // or held between clips. The CMS preview stops on this rather than playing over
+                    // a panel that is dark.
                     .put("playing", state?.playing == true)
                     .put("reportedAt", ServerClock.isoUtc())
                 graph.realtime.emitPlayerState(payload)
