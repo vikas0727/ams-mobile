@@ -103,7 +103,36 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun renderLoop() {
         while (viewModelScope.isActive) {
             val plan = graph.content.plan.value
-            if (plan == null || !plan.hasContent) {
+            /*
+             * A download stops the wall.
+             *
+             * Dropping the frame is what STOPS the outgoing playlist rather than merely hiding it:
+             * PlayerScreen's zones leave the composition, ZoneContent's DisposableEffect releases
+             * every ExoPlayer, and the decoders and the uplink are left to the download instead of
+             * being split with a loop nobody can see.
+             *
+             * Going through the same branch as "no content" rather than adding a second one is
+             * deliberate, because three things have to stay true together and this is the single
+             * place that guarantees it:
+             *
+             *  - `closeOutEverything` runs, so the slide that was up when the screen went black is
+             *    recorded for the time it ACTUALLY played instead of being credited with the length
+             *    of the download. Short plays are already reported as skipped, so the proof-of-play
+             *    stays commercially honest by itself.
+             *  - `playbackState()` returns null, and PlayerService turns that into a packet with
+             *    `playing = false`. The CMS preview therefore stops on a still and says the panel is
+             *    not showing anything, rather than animating content the wall is not carrying. The
+             *    packets keep arriving, so this stays distinguishable from a dead player.
+             *  - `currentlyPlaying()` returns null, so the screen list does not name a playlist that
+             *    was pulled minutes ago.
+             *
+             * `currentPlanIdentity` is intentionally left alone. When the download finishes and the
+             * new manifest is published the identity changes and the loop restarts from the top; a
+             * download that only refilled an evicted file leaves it unchanged and the loop resumes
+             * at the clock position it would have reached, which is what keeps a video wall in phase.
+             */
+            val downloading = graph.content.downloadState.value is ContentRepository.DownloadState.Downloading
+            if (plan == null || !plan.hasContent || downloading) {
                 if (_frame.value != null) {
                     closeOutEverything()
                     _frame.value = null

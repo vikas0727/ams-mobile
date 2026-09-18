@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
@@ -60,10 +59,22 @@ private val Bad = Color(0xFFFF6B6B)
  * screen in a public place the difference between "nothing is assigned", "content is on its way"
  * and "something went wrong" is the whole message:
  *
- *  - **nothing playing, nothing downloading** → "No Content Assigned", with what to do next.
- *  - **nothing playing, downloading** → full progress panel.
- *  - **already playing, downloading** → a small corner chip. A content change must not black out a
- *    live screen, so the old loop keeps running and the new one swaps in when it is complete.
+ *  - **nothing assigned** → "No Content Assigned", with what to do next.
+ *  - **downloading** → the full progress panel, black, centred, on its own.
+ *  - **downloads failed** → the reason, on the glass.
+ *
+ * A download takes the screen. This reverses an earlier design in which an already-playing loop
+ * kept running behind a small corner chip while the next playlist came down — the reasoning being
+ * that a content change should never black out a live panel. Operationally the opposite is wanted:
+ * when a new playlist is assigned the old one is what the site has just been told to STOP showing,
+ * and leaving it up for the length of a download means a screen carrying withdrawn advertising for
+ * minutes after it was pulled. Going black and saying why is the honest state, and it is a state an
+ * operator standing at the panel can read from across the room.
+ *
+ * Note that this costs nothing on a routine re-sync: `ContentRepository.downloadAssets` only enters
+ * [DownloadState.Downloading] when at least one asset is genuinely absent from the cache. A manifest
+ * refresh that re-signs URLs for files the box already holds never reaches this branch, so a healthy
+ * screen is not interrupted by housekeeping.
  */
 @Composable
 fun PlayerScreen(
@@ -106,13 +117,21 @@ fun PlayerScreen(
         }
 
         val current = frame
-        if (current != null) {
+        /*
+         * A download outranks the frame.
+         *
+         * PlayerViewModel drops the frame to null while a download is running, which is what
+         * actually stops playback: the zones leave the composition, their ExoPlayers are released
+         * by ZoneContent's DisposableEffect, and no proof-of-play accrues for slides nobody can
+         * see. This check is the same decision made one tick earlier, so the swap to black happens
+         * on the composition that observes the download rather than up to TICK_MS later — the
+         * difference between a clean cut and a visible stutter of the outgoing loop.
+         */
+        if (current != null && download !is DownloadState.Downloading) {
             LayoutCanvas(current, playbackGeneration)
             // The CMS's `dotIndicators` setting, honoured. Read at draw time rather than pushed,
             // because it is a rendering preference with nothing to "apply" to hardware.
             if (dotIndicators) SlideDots(current, Modifier.align(Alignment.BottomCenter))
-            // Playing, but a newer playlist is still coming down. Small and out of the way.
-            (download as? DownloadState.Downloading)?.let { DownloadChip(it) }
         } else {
             StatusScreen(download = download, hasPlan = plan != null)
         }
@@ -268,42 +287,6 @@ private fun StatusScreen(download: DownloadState, hasPlan: Boolean) {
                     }
                 }
             }
-        }
-    }
-}
-
-/**
- * The playing-while-downloading indicator.
- *
- * Bottom-left, small, semi-transparent: it has to be visible to someone looking for it and ignorable
- * to everyone else, because whatever is behind it is live content in a public space.
- */
-@Composable
-private fun DownloadChip(state: DownloadState.Downloading) {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomStart) {
-        Column(
-            modifier = Modifier
-                .padding(20.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(Color(0xCC0B1220))
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Text(
-                text = stringResource(
-                    R.string.player_downloading_count,
-                    state.index,
-                    state.total,
-                ),
-                color = Muted,
-                fontSize = 13.sp,
-            )
-            LinearProgressIndicator(
-                progress = { state.percent / 100f },
-                modifier = Modifier.width(200.dp),
-                color = Accent,
-                trackColor = Track,
-            )
         }
     }
 }
