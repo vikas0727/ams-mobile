@@ -324,6 +324,12 @@ class ContentRepository(
                 downloadProgressPercent = it.downloadProgressPercent,
                 localPath = it.localPath,
                 checksum = it.checksum,
+                // Why this one failed, when it did. The device has always known — it was only ever
+                // written to the panel and to logcat, so "some screens do not download" could not be
+                // answered from the portal, which is where the person asking the question is sitting.
+                errorMessage = if (it.status == AmsConstants.DownloadStatus.FAILED) {
+                    cache.failureReason(it.cacheKey)
+                } else null,
             )
         }
 

@@ -128,7 +128,7 @@ class MediaCache(
                         else -> "S3 returned HTTP ${response.code}"
                     }
                     AppLog.w(TAG, "Download failed for ${asset.fileName} — $reason")
-                    markFailed(asset, target)
+                    markFailed(asset, target, reason)
                     return@withContext Outcome.Failed(reason, retryable = response.code != 404)
                 }
                 val body = response.body ?: run {
@@ -165,7 +165,7 @@ class MediaCache(
                     part.delete()
                     val reason = "Could not finalise the file on disk — is storage full?"
                     AppLog.e(TAG, "Download failed for ${asset.fileName} — $reason")
-                    markFailed(asset, target)
+                    markFailed(asset, target, reason)
                     return@withContext Outcome.Failed(reason)
                 }
 
@@ -185,7 +185,7 @@ class MediaCache(
             // ends up in the ring buffer, the diagnostics overlay and whatever someone pastes into
             // a bug report.
             AppLog.w(TAG, "Download failed for ${asset.fileName} — $reason", e)
-            markFailed(asset, File(root, fileNameFor(key, asset.fileName)))
+            markFailed(asset, File(root, fileNameFor(key, asset.fileName)), reason)
             Outcome.Failed(reason)
         } finally {
             synchronized(inFlight) { inFlight.remove(key) }
@@ -325,13 +325,29 @@ class MediaCache(
         runCatching { root.usableSpace }.getOrDefault(0L)
     }
 
-    private suspend fun markFailed(asset: Asset, target: File) {
+    private suspend fun markFailed(asset: Asset, target: File, reason: String? = null) {
         val existing = dao.find(asset.cacheKey)
         dao.upsert(
             baseRow(asset, target, AmsConstants.DownloadStatus.FAILED, 0)
                 .copy(failureCount = (existing?.failureCount ?: 0) + 1)
         )
+        if (reason != null) synchronized(failureReasons) { failureReasons[asset.cacheKey] = reason }
     }
+
+    /**
+     * Why each failed asset failed, for the inventory report.
+     *
+     * In memory rather than in Room deliberately. The reason is worth knowing while a screen is
+     * failing — which is when somebody is looking at the CMS asking why a box is blank — and adding
+     * a column would mean a schema version bump and a migration on every device in the fleet to
+     * carry a string that the next successful sync makes obsolete anyway. A restart loses it and the
+     * retry that follows records it again.
+     */
+    private val failureReasons = mutableMapOf<String, String>()
+
+    /** The last failure reason recorded for [cacheKey], if it failed since this app started. */
+    fun failureReason(cacheKey: String): String? =
+        synchronized(failureReasons) { failureReasons[cacheKey] }
 
     private fun baseRow(asset: Asset, target: File, status: String, progress: Int) =
         CachedAssetEntity(

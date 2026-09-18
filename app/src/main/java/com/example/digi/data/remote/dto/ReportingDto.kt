@@ -107,6 +107,8 @@ data class DownloadedFileDto(
     val downloadProgressPercent: Int? = null,
     val localPath: String? = null,
     val checksum: String? = null,
+    /** Populated only for a failed row — the reason, in words an operator can act on. */
+    val errorMessage: String? = null,
 )
 
 @Serializable
