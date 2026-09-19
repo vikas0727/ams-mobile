@@ -15,6 +15,8 @@ import com.example.digi.data.remote.dto.HeartbeatResponse
 import com.example.digi.data.remote.dto.MeResponse
 import com.example.digi.data.remote.dto.PairRequest
 import com.example.digi.data.remote.dto.PairResponse
+import com.example.digi.data.remote.dto.PlaybackStateRequest
+import com.example.digi.data.remote.dto.PlaybackStateResponse
 import com.example.digi.data.remote.dto.PlayerEventsRequest
 import com.example.digi.data.remote.dto.PlayerEventsResponse
 import com.example.digi.data.remote.dto.ProofOfPlayRequest
@@ -83,6 +85,20 @@ interface PlayerApi {
 
     @POST("player/device-info")
     suspend fun deviceInfo(@Body body: DeviceInfoRequest): Response<Envelope<DeviceInfoResponse>>
+
+    /**
+     * Where the playback position goes when the socket cannot carry it.
+     *
+     * Not a replacement for the socket emit — that stays the normal path, because it is cheap
+     * enough to send twice a second. This is for a player whose socket will not connect at all,
+     * which happens wherever a network allows plain HTTPS and blocks WebSocket upgrades. Without
+     * it such a screen heartbeats, takes commands and uploads screenshots perfectly while the CMS
+     * insists it is not reporting its position.
+     */
+    @POST("player/playback-state")
+    suspend fun playbackState(
+        @Body body: PlaybackStateRequest,
+    ): Response<Envelope<PlaybackStateResponse>>
 
     @POST("player/downloaded-files")
     suspend fun downloadedFiles(

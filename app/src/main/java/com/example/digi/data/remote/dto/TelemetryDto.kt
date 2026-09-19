@@ -134,6 +134,29 @@ data class HeartbeatBackfillResponse(
 @Serializable
 data class DeviceInfoRequest(val deviceInfo: JsonObject)
 
+/**
+ * The playback position, for the HTTP fallback when the socket is not connected.
+ *
+ * Mirrors the `player-state` socket payload field for field, minus `screenId` — the server takes
+ * that from the player token, which makes this route harder to spoof than the socket event.
+ */
+@Serializable
+data class PlaybackStateRequest(
+    val mediaId: String? = null,
+    val name: String? = null,
+    val mediaType: String? = null,
+    val positionMs: Long = 0L,
+    val slideIndex: Int = -1,
+    val durationMs: Long = 0L,
+    val playing: Boolean = false,
+    val reportedAt: String? = null,
+)
+
+@Serializable
+data class PlaybackStateResponse(
+    val recordedAt: String? = null,
+)
+
 @Serializable
 data class DeviceInfoResponse(
     val propertyCount: Int? = null,

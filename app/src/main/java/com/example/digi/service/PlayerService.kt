@@ -18,6 +18,7 @@ import com.example.digi.core.AppLog
 import com.example.digi.core.DigiApp
 import com.example.digi.core.PlayerHost
 import com.example.digi.core.ServerClock
+import com.example.digi.data.remote.dto.PlaybackStateRequest
 import com.example.digi.data.remote.dto.SettingsDto
 import com.example.digi.device.DeviceController
 import org.json.JSONObject
@@ -473,6 +474,9 @@ class PlayerService : Service() {
      * playing. These packets say what it IS playing — and when they stop arriving, the preview says
      * the screen is not reporting instead of cheerfully playing content a dead panel is not showing.
      */
+    /** Whether the "socket down, using HTTP" line has been logged for the current outage. */
+    private var httpStateFallbackAnnounced = false
+
     private suspend fun streamPlaybackState() {
         while (scope.isActive) {
             if (!graph.store.realtimeCaptureEnabled) {
@@ -517,11 +521,63 @@ class PlayerService : Service() {
                     // a panel that is dark.
                     .put("playing", state?.playing == true)
                     .put("reportedAt", ServerClock.isoUtc())
-                graph.realtime.emitPlayerState(payload)
+
+                /*
+                 * The socket first, HTTP only when it is not there.
+                 *
+                 * The socket stays the normal path: it is cheap enough to send twice a second,
+                 * which is what makes the CMS preview real video rather than a slideshow.
+                 *
+                 * But it is not reachable everywhere. Plenty of sites allow ordinary HTTPS and
+                 * block WebSocket upgrades, and `emitPlayerState` silently does nothing when the
+                 * socket is down — by design, so the CMS says "not reporting" instead of showing a
+                 * stale preview. The effect on such a network is a screen that heartbeats, collects
+                 * its commands and uploads screenshots perfectly while Live Data View insists it is
+                 * not reporting its position, with nothing in front of the operator to act on.
+                 *
+                 * So when the socket is not connected the identical packet goes over HTTP at the
+                 * same cadence. It costs a request every two seconds, and only while an operator is
+                 * actually watching — `realtimeCaptureEnabled` gates this whole loop.
+                 */
+                if (graph.realtime.connected.value) {
+                    httpStateFallbackAnnounced = false
+                    graph.realtime.emitPlayerState(payload)
+                } else {
+                    reportPlaybackStateOverHttp(state)
+                }
             }.onFailure { AppLog.d(TAG, "Could not report playback state: $it") }
 
             delay(PLAYBACK_STATE_MS)
         }
+    }
+
+    /**
+     * Post the playback position, for players whose socket will not connect.
+     *
+     * Fire-and-forget like the socket emit it stands in for: nothing waits on the result and the
+     * next packet is two seconds away, so a failure is logged at debug and dropped rather than
+     * retried. Logged once per transition rather than per packet — at this cadence a line every
+     * two seconds would bury everything else in logcat.
+     */
+    private suspend fun reportPlaybackStateOverHttp(state: PlayerHost.PlaybackState?) {
+        if (!httpStateFallbackAnnounced) {
+            httpStateFallbackAnnounced = true
+            AppLog.i(TAG, "Push socket is not connected — reporting playback position over HTTP instead")
+        }
+        runCatching {
+            graph.api.playbackState(
+                PlaybackStateRequest(
+                    mediaId = state?.mediaId,
+                    name = state?.name,
+                    mediaType = state?.mediaType,
+                    positionMs = state?.positionMs ?: 0L,
+                    slideIndex = state?.slideIndex ?: -1,
+                    durationMs = state?.durationMs ?: 0L,
+                    playing = state?.playing == true,
+                    reportedAt = ServerClock.isoUtc(),
+                )
+            )
+        }.onFailure { AppLog.d(TAG, "Could not post playback state: $it") }
     }
 
     /* ── foreground plumbing ────────────────────────────────────────────────── */
