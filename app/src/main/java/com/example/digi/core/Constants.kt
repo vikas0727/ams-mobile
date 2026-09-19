@@ -113,6 +113,16 @@ object AmsConstants {
     /** Which rung of the playback priority chain the manifest came from, echoed in `contentSource`. */
     object ContentSource {
         const val CLUSTER = "cluster"
+
+        /**
+         * A batch in playlist mode: every screen in it plays one shared playlist.
+         *
+         * Deliberately NOT [CLUSTER]. PlanBuilder branches on that value to decide whether to read
+         * the manifest's `zones` (the slot grid) or its `layouts` (a playlist), and what this source
+         * carries is a playlist. Naming it cluster would send a playlist payload through the grid
+         * parser and render nothing.
+         */
+        const val CLUSTER_PLAYLIST = "cluster_playlist"
         const val SCHEDULED = "scheduled"
         const val DIRECT_PLAYLIST = "direct_playlist"
         const val MEDIA_FILES = "media_files"
