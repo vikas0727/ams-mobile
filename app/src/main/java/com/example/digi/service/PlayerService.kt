@@ -103,6 +103,7 @@ class PlayerService : Service() {
 
             loopJob = scope.launch { runLoop() }
             scope.launch { watchNetwork() }
+            scope.launch { watchPairing() }
             scope.launch { streamPlaybackState() }
             // Deliberately its own job rather than a step in startUp — see keepAwakeLoop.
             scope.launch { keepAwakeLoop() }
@@ -156,6 +157,13 @@ class PlayerService : Service() {
                 runCatching { heartbeatCycle() }
                     .onFailure { AppLog.e(TAG, "Heartbeat cycle failed", it) }
             }
+
+            // Cheap and idempotent — see RealtimeChannel.ensureConnected. Run here rather than
+            // anywhere clever because every reason the channel can end up detached (pairing
+            // finished after the service started, a re-pair, a client that stopped reconnecting)
+            // shows up as "not attached right now" and nothing else has to be understood.
+            runCatching { graph.realtime.ensureConnected() }
+                .onFailure { AppLog.d(TAG, "Push channel could not be attached: $it") }
 
             runCatching { tick() }.onFailure { AppLog.e(TAG, "Tick failed", it) }
 
@@ -453,6 +461,32 @@ class PlayerService : Service() {
                 AppLog.i(TAG, "Network lost — playback continues from cache")
                 graph.events.appEvent(AmsConstants.LogAction.NETWORK_LOST)
             }
+        }
+    }
+
+    /**
+     * Attach the push channel the moment this box becomes paired — and let go when it is unpaired.
+     *
+     * The service starts before pairing on a new screen, so the `connect()` in `onStartCommand` ran
+     * at a moment when there was no screen id to join a room with. Pairing itself calls
+     * `PlayerService.start` again, but the service is already running by then and `onStartCommand`
+     * short-circuits on `loopJob != null`, so that call did nothing for the socket. The result was
+     * a screen that paired, synced and played correctly while the CMS reported it was not sending
+     * its position — until the app was killed and reopened, which is the only thing that used to
+     * re-run `connect()` with a screen id in hand.
+     *
+     * Watching the store closes that gap without anyone having to remember to call anything: the
+     * same flow the UI uses to swap the pairing screen for the player drives this.
+     */
+    private suspend fun watchPairing() {
+        graph.store.paired.collect {
+            // One call for both directions: `ensureConnected` attaches when there is a screen to
+            // watch, and lets go of a socket that is still watching a screen this box has been
+            // unpaired from. It is silent when there is nothing to do, so the emission that
+            // arrives the moment this starts collecting costs nothing on a box that is already
+            // attached — or still sitting on its pairing code.
+            runCatching { graph.realtime.ensureConnected() }
+                .onFailure { AppLog.d(TAG, "Push channel could not be attached: $it") }
         }
     }
 

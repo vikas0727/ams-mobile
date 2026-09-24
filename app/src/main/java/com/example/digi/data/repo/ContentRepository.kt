@@ -148,13 +148,26 @@ class ContentRepository(
             return@withLock true
         }
 
-        // Step 2: download everything BEFORE putting the new playlist on screen.
-        //
-        // Publishing a half-downloaded plan would start the loop with files missing and grow it as
-        // they landed, which reads on a public screen as a fault rather than as progress. The one
-        // thing that must not stop is a playlist that is ALREADY playing: a screen showing last
-        // week's loop keeps showing it through the whole download and swaps only when the new one
-        // is complete, so a content change is invisible rather than a gap.
+        /*
+         * Step 2: download everything BEFORE putting the new playlist on screen.
+         *
+         * Publishing a half-downloaded plan would start the loop with files missing and grow it as
+         * they landed, which reads on a public screen as a fault rather than as progress.
+         *
+         * This used to go further and say the outgoing playlist must KEEP PLAYING throughout, so a
+         * content change was invisible rather than a gap. That is right for a public concourse and
+         * wrong everywhere an operator is standing in front of the screen waiting to see their
+         * change take: the wall carried on showing last week's loop with nothing to say why, and a
+         * cluster that had just been saved and synced looked like one that had not been. It read as
+         * the change being lost rather than as it being on its way.
+         *
+         * So the decision now sits one layer up, in PlayerViewModel: the frame is dropped for as
+         * long as `downloadState` is Downloading, which releases the zones' players, closes out
+         * proof-of-play honestly, and puts the full-screen download panel on the glass. Playback
+         * resumes on the new plan the moment the last file lands. Nothing here changed — this note
+         * exists because the old one described the opposite behaviour and would send the next
+         * person looking in the wrong file.
+         */
         downloadAssets(body)
 
         // Step 3: publish. Even if some files permanently failed, what did arrive is published —

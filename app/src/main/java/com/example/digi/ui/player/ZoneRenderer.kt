@@ -446,18 +446,39 @@ private fun VideoLayer(
     }
 }
 
-/** The manifest's `fitMode` — the CMS offers cover / contain / fill. */
+/*
+ * The manifest's `fitMode` — cover / contain / fill — and what an absent one means.
+ *
+ * Filling the panel is the default, and only an explicit `contain` letterboxes.
+ *
+ * It used to be the other way round: anything the player did not recognise, including a blank or
+ * missing value, fell through to FIT. That reads as the cautious choice and on a signage wall it is
+ * the wrong one. A 16:9 clip on a 2400x1080 panel comes out pillarboxed, and on a portrait device
+ * it is worse — a band of video across the middle with black above and below. Nothing in the CMS
+ * playlist editor offers this setting, so no operator ever asked for those bars: every `contain` in
+ * the database is a default nobody chose, and every screen showing them is showing a bug.
+ *
+ * `contain` is still honoured where it is genuinely meant — a logo or a portrait poster in a zone
+ * of the wrong shape, which is a real layout and would be ruined by cropping. This only changes
+ * what happens when the manifest does not say.
+ *
+ * Existing slides carry the old value explicitly, so the migration that rewrites them
+ * (20260919120000-ams-slide-fitmode-cover) is what fixes content already in the database; this is
+ * what stops the next slide inheriting the problem.
+ */
 private fun String.toContentScale(): ContentScale = when (lowercase()) {
-    "cover" -> ContentScale.Crop
+    "contain", "fit" -> ContentScale.Fit
     "fill", "stretch" -> ContentScale.FillBounds
-    else -> ContentScale.Fit
+    else -> ContentScale.Crop
 }
 
 @OptIn(UnstableApi::class)
 private fun String.toResizeMode(): Int = when (lowercase()) {
-    "cover" -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+    "contain", "fit" -> AspectRatioFrameLayout.RESIZE_MODE_FIT
     "fill", "stretch" -> AspectRatioFrameLayout.RESIZE_MODE_FILL
-    else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+    // ZOOM scales until the shorter side fills and crops the overflow — "cover", and what a wall
+    // is expected to do with a clip that is not exactly the panel's shape.
+    else -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
 }
 
 /** `#RRGGBB` or `#AARRGGBB` from the CMS colour pickers; anything else is treated as unset. */
