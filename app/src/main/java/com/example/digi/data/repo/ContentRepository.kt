@@ -425,6 +425,68 @@ class ContentRepository(
     }
 
     /** Forces the next heartbeat to be told its content is stale. */
+    /**
+     * REFETCH_PLAYLIST: throw the local copy away and pull the whole assignment again.
+     *
+     * The CMS button says "Discards what the player has stored and pulls its content assignment
+     * again from scratch". What it used to run was `invalidate()` + `sync()` — which sets
+     * `contentVersion` to -1 and fetches the manifest. `sync()` fetches the manifest anyway,
+     * regardless of that field, and `downloadAssets` skips every file already on disk. So nothing
+     * was discarded, nothing was downloaded, and the command acked as a success: the operator's
+     * one tool for "this screen is showing something it should not be" did precisely nothing, and
+     * reported that it had worked. That is the bug.
+     *
+     * Discarding means all three: the cached manifest (or a cold start restores the very plan
+     * being thrown away), the plan in memory, and the media files. Then a fresh sync pulls it all
+     * back down, which is what makes this different from SYNC_NOW — that one stays a cheap
+     * re-fetch, and having both do the same thing is how this went unnoticed.
+     *
+     * ## Nothing is destroyed until the server answers
+     *
+     * This deletes the only copy of the content this screen has. On a box whose uplink is down,
+     * running it would leave a public panel with nothing to play and no way to get it back until
+     * the network returns. So the server is asked a cheap question first, and a screen that cannot
+     * reach it keeps everything and reports the failure — far better than a blank wall and an
+     * acked command.
+     *
+     * The blackout while it re-downloads is intended and is the same one a new assignment produces:
+     * `downloadState` turns Downloading, PlayerViewModel drops the frame, and the panel shows the
+     * download screen rather than content that is being deleted underneath it.
+     *
+     * @return true when the content was discarded and re-synced
+     */
+    suspend fun refetch(): Boolean {
+        val reachable = runCatching { apiCall { api.me() } is ApiResult.Success }.getOrDefault(false)
+        if (!reachable) {
+            AppLog.w(TAG, "REFETCH_PLAYLIST: server unreachable — keeping the local copy")
+            events.appEvent(AmsConstants.LogAction.SYNC_FAILED, status = "refetch-unreachable")
+            return false
+        }
+
+        // Order matters: stop playing from the files before deleting them, so no zone is left
+        // holding a handle to something that has gone.
+        _plan.value = null
+        store.clearManifest()
+        invalidate()
+
+        val removed = cache.clearAll()
+        AppLog.i(TAG, "REFETCH_PLAYLIST: discarded the manifest and $removed cached file(s)")
+        events.appEvent(
+            action = AmsConstants.LogAction.CACHE_CLEARED,
+            status = "Refetch: discarded $removed file(s) and the stored manifest",
+        )
+
+        val ok = runCatching { sync() }.getOrDefault(false)
+        if (!ok) {
+            // The sync failed AFTER the purge — the window this cannot rule out entirely, since a
+            // link can drop between the two calls. Say so plainly: the next heartbeat repairs it,
+            // and an operator who knows that will not stand there re-pressing the button.
+            AppLog.w(TAG, "REFETCH_PLAYLIST: re-sync failed after the purge; the next beat will retry")
+        }
+        reportInventory()
+        return ok
+    }
+
     fun invalidate() {
         store.contentVersion = -1
     }

@@ -91,6 +91,9 @@ import kotlin.math.abs
 fun ZoneContent(
     zoneFrame: PlaybackEngine.ZoneFrame,
     muted: Boolean,
+    /** Which time round the loop this is. Only [VideoLayer] uses it — see the note on its advance
+     *  effect for why a single-clip zone cannot restart itself without it. */
+    cycleIndex: Long,
     modifier: Modifier = Modifier,
 ) {
     val slide = zoneFrame.slide
@@ -109,6 +112,7 @@ fun ZoneContent(
                 videoSlides = videoSlides,
                 slideIndex = zoneFrame.slideIndex,
                 startAtMs = zoneFrame.offsetInSlideMs,
+                cycleIndex = cycleIndex,
                 muted = muted,
             )
         }
@@ -168,6 +172,7 @@ private fun VideoLayer(
     videoSlides: List<PlanSlide>,
     slideIndex: Int,
     startAtMs: Long,
+    cycleIndex: Long,
     muted: Boolean,
 ) {
     val context = LocalContext.current
@@ -285,7 +290,27 @@ private fun VideoLayer(
         onDispose { player.removeListener(listener) }
     }
 
-    LaunchedEffect(targetItem, loadedKey) {
+    /*
+     * `cycleIndex` is in the key list, and a one-video playlist is the reason.
+     *
+     * This effect is what tells the player to move, and it only runs when something in its keys
+     * changes. With two or more clips `targetItem` changes at every boundary, so it runs — and the
+     * last-to-first wrap is just another boundary. With ONE clip `targetItem` is 0 for the entire
+     * life of the plan and never changes at all, so after the first run nothing here executed
+     * again, ever.
+     *
+     * That is invisible until you remember `setPauseAtEndOfMediaItems(true)` up in the builder.
+     * The player is deliberately told to STOP at the end of each item so it cannot run ahead of
+     * the engine, and REPEAT_MODE_ALL cannot override that — the pause happens at the boundary,
+     * before the repeat. So a single video played once, paused on its final frame, and stayed
+     * there: the engine's loop went round and round underneath while the one thing that could
+     * have restarted the clip was waiting on an index that was never going to change.
+     *
+     * The cycle index changes every time the loop comes round, whether or not anything else did.
+     * It costs one extra run of this effect per cycle on every other zone, where the first branch
+     * below finds the player already in the right place and does nothing.
+     */
+    LaunchedEffect(targetItem, loadedKey, cycleIndex) {
         // The engine has moved on to a playlist the player has not loaded yet. Doing anything here
         // would be applying new indices to old media — the bug this guard exists to prevent.
         if (loadedKey != playlistKey) return@LaunchedEffect
@@ -308,9 +333,33 @@ private fun VideoLayer(
                 // index into the playlist the engine is talking about.
                 current == targetItem -> {
                     val expected = startAtMs
-                    if (expected > SEEK_THRESHOLD_MS &&
+                    val duration = player.duration
+
+                    /*
+                     * Finished, and being held on its last frame.
+                     *
+                     * `setPauseAtEndOfMediaItems(true)` is what put it there, and that is the
+                     * right behaviour DURING a slot — a ten-second clip in a thirty-second slot
+                     * should hold rather than drop to black. It is only wrong once the loop has
+                     * come round, which is exactly when this branch is reached with the clip
+                     * already at its end, so that is where the restart goes.
+                     *
+                     * The position test carries the STATE_ENDED one because the two do not both
+                     * fire: with REPEAT_MODE_ALL set, a player parked at an item boundary reports
+                     * READY, not ENDED. Checking both costs nothing and means neither
+                     * configuration can leave a screen frozen.
+                     */
+                    val finished = player.playbackState == Player.STATE_ENDED ||
+                        (duration > 0 && player.currentPosition >= duration - CLIP_END_TOLERANCE_MS)
+
+                    if (finished) {
+                        player.seekTo(if (expected > SEEK_THRESHOLD_MS) expected else 0L)
+                    } else if (expected > SEEK_THRESHOLD_MS &&
                         abs(player.currentPosition - expected) > DRIFT_TOLERANCE_MS
                     ) {
+                        // Correct the position only if it has genuinely drifted — seeking on every
+                        // tick would flush the decoder and reintroduce the very stutter this is
+                        // here to remove.
                         player.seekTo(expected)
                     }
                 }
@@ -494,5 +543,10 @@ private const val SEEK_THRESHOLD_MS = 500L
 /** How far the player may drift from the engine before it is corrected. Loose on purpose: every
  *  correction is a flush, and a flush is more visible than the drift it fixes. */
 private const val DRIFT_TOLERANCE_MS = 1_500L
+
+/** How close to its duration a clip has to be before it counts as finished. Generous, because a
+ *  decoder does not always land on the exact final millisecond and the cost of being wrong here is
+ *  a restart a quarter of a second early on a clip that was about to restart anyway. */
+private const val CLIP_END_TOLERANCE_MS = 250L
 
 private const val TAG = "ZoneRenderer"

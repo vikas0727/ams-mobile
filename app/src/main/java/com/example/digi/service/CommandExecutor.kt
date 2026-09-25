@@ -156,11 +156,26 @@ class CommandExecutor(
                 )
             }
 
-            AmsConstants.Command.SYNC_NOW, AmsConstants.Command.REFETCH_PLAYLIST -> {
+            AmsConstants.Command.SYNC_NOW -> {
                 content.invalidate()
                 val ok = content.sync()
                 if (ok) DeviceController.Outcome.ok("Content re-synced")
                 else DeviceController.Outcome.failed("Re-sync failed — the server was unreachable")
+            }
+
+            // Deliberately no longer sharing a branch with SYNC_NOW. They read as the same thing
+            // and are not: SYNC_NOW asks "is there anything new?", REFETCH throws the local copy
+            // away and pulls the lot again. Pointing both at the cheap one is why this button
+            // acked without doing anything — see ContentRepository.refetch.
+            AmsConstants.Command.REFETCH_PLAYLIST -> {
+                if (content.refetch()) {
+                    DeviceController.Outcome.ok("Local copy discarded and content downloaded again")
+                } else {
+                    DeviceController.Outcome.failed(
+                        "Could not reach the server — nothing was discarded and the screen is still " +
+                            "playing what it had"
+                    )
+                }
             }
 
             // Not implemented, on purpose. Android's only in-app lockdown is lock task mode, and

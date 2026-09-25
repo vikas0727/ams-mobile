@@ -158,6 +158,10 @@ private fun LayoutCanvas(frame: PlaybackEngine.Frame, playbackGeneration: Int) {
                     ZoneContent(
                         zoneFrame = zoneFrame,
                         muted = zone.muted,
+                        // Which time round the loop this is, so a zone holding a single video
+                        // knows the loop has come round — the only signal that a one-clip zone
+                        // ever gets. See VideoLayer's advance effect.
+                        cycleIndex = frame.cycleIndex,
                         modifier = Modifier
                             .offset(
                                 x = panelWidth * zone.x,
