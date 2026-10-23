@@ -3,6 +3,7 @@ package com.example.digi.data.repo
 import com.example.digi.core.AmsConstants
 import com.example.digi.core.AppLog
 import com.example.digi.core.FirebaseTelemetry
+import com.example.digi.BuildConfig
 import com.example.digi.core.ServerClock
 import com.example.digi.data.local.PlayerStore
 import com.example.digi.data.remote.ApiResult
@@ -38,6 +39,19 @@ class PairingRepository(
         /** The code was wrong, expired, or the screen is already on other hardware. Actionable text. */
         data class Rejected(val message: String) : PairOutcome
         data class Offline(val message: String) : PairOutcome
+    }
+
+    /**
+     * The one-line "why" appended to the offline message.
+     *
+     * Deliberately the exception's class name and nothing else - a stack trace on a signage screen
+     * helps nobody, but "UnknownHostException" tells an installer to check DNS and
+     * "SSLHandshakeException" tells them to check the certificate or the tablet's date, which is
+     * the difference between a five-minute fix and a phone call.
+     */
+    private fun reasonHint(cause: Throwable?): String {
+        val name = cause?.let { it::class.java.simpleName }?.takeIf { it.isNotBlank() } ?: return ""
+        return "\n($name)"
     }
 
     fun deviceId(): String {
@@ -91,9 +105,19 @@ class PairingRepository(
                 PairOutcome.Paired(body.screen.name)
             }
 
-            is ApiResult.Offline -> PairOutcome.Offline(
-                "Cannot reach the AMS server. Check the network and the server address."
-            )
+            // The server never answered: DNS, TCP, TLS or a timeout - NOT a rejected code. The
+            // cause used to be dropped on the floor here, which left the only evidence of what
+            // actually went wrong in an okhttp "<-- HTTP FAILED" line nobody reads off a tablet
+            // bolted to a wall. Log it, and put the short form on screen: "UnknownHostException"
+            // (no DNS) and "SSLHandshakeException" (expired certificate, or the device's own clock
+            // being wrong) are different jobs for whoever is standing in front of it.
+            is ApiResult.Offline -> {
+                AppLog.w(TAG, "Pairing could not reach ${BuildConfig.API_BASE_URL}", result.cause)
+                PairOutcome.Offline(
+                    "Cannot reach the AMS server. Check the network and the server address." +
+                        reasonHint(result.cause)
+                )
+            }
 
             is ApiResult.Unauthorized -> PairOutcome.Rejected(result.message ?: "Pairing rejected")
 
