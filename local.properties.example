@@ -10,7 +10,18 @@
 #   .env.prod                     ->  port 5001, not 5000
 digi.apiBaseUrl=http://10.0.2.2:5000/api/v1/
 
-# ── AES ───────────────────────────────────────────────────────────────────────
+# Per build flavor (./gradlew assembleDevDebug / assembleUatRelease / assembleProdRelease). Each wins
+# over digi.apiBaseUrl for its flavor. Release builds are HTTPS-only, so UAT and PROD need https.
+#ams.dev.apiBaseUrl=http://192.168.1.20:5000/api/v1/
+#ams.uat.apiBaseUrl=https://<uat api host>/api/v1/
+#ams.prod.apiBaseUrl=https://<prod api host>/api/v1/
+
+# ── Payload encryption v2 ────────────────────────────────────────────────────
+# The API's PUBLIC key per flavor is read from the committed crypto-server-keys.properties (written
+# by the backend's `npm run crypto:keys`). Override one only if you must:
+#ams.prod.cryptoServerKey=
+
+# ── AES (legacy v1 envelope - only used while v2 is not active) ───────────────────────────────────────────────────────────────────────
 # From D:\Projects\AMS\.env.dev lines 25-26, WITHOUT the surrounding quotes —
 # dotenv strips them, so the bare string is what the server actually holds.
 # The secret is SHA-256'd by both sides; the IV is hex-decoded, 32 hex characters.

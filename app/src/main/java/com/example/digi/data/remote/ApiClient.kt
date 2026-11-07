@@ -3,6 +3,7 @@ package com.example.digi.data.remote
 import com.example.digi.BuildConfig
 import com.example.digi.data.crypto.AesCipher
 import com.example.digi.data.crypto.CryptoInterceptor
+import com.example.digi.data.crypto.SessionCipher
 import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
@@ -45,14 +46,33 @@ object ApiClient {
         else HttpLoggingInterceptor.Level.BASIC
         // The player token is a credential; logcat is readable by anyone with adb on the box.
         redactHeader("Authorization")
+        redactHeader("X-Crypto-Session")
     }
 
     fun create(tokenProvider: () -> String?): PlayerApi {
         val cipher = AesCipher(BuildConfig.AES_SECRET_KEY, BuildConfig.AES_IV)
 
+        // Payload encryption v2 when this build pins the server's public key (see SessionCipher);
+        // otherwise the legacy static-key envelope. The handshake goes out on a client WITHOUT the
+        // crypto interceptor - it is the thing that sets the interceptor up.
+        val pinnedKey = BuildConfig.CRYPTO_SERVER_KEY.trim()
+        val sessionCipher = pinnedKey.takeIf { it.isNotEmpty() }?.let { runCatching { SessionCipher(it) }.getOrNull() }
+        val handshakeClient = OkHttpClient.Builder()
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .build()
+
         val client = OkHttpClient.Builder()
             .addInterceptor(AuthInterceptor(tokenProvider))
-            .addInterceptor(CryptoInterceptor(cipher, BuildConfig.AES_ENABLED))
+            .addInterceptor(
+                CryptoInterceptor(
+                    cipher = cipher,
+                    enabled = BuildConfig.AES_ENABLED,
+                    session = sessionCipher,
+                    handshakeUrl = normalisedBaseUrl() + "crypto/session",
+                    handshakeClient = handshakeClient,
+                )
+            )
             .addInterceptor(logging)
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(45, TimeUnit.SECONDS)

@@ -1,5 +1,6 @@
 package com.example.digi
 
+import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
@@ -45,6 +46,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.digi.R
+import com.example.digi.core.AmsConstants
 import com.example.digi.core.AppLog
 import com.example.digi.core.DigiApp
 import com.example.digi.core.PlayerHost
@@ -108,6 +110,24 @@ class MainActivity : ComponentActivity(), PlayerHost {
                 val showDiagnostics by diagnosticsVisible.collectAsStateWithLifecycle()
 
                 val rotation by appRotation.collectAsStateWithLifecycle()
+
+                /*
+                 * Tablet Mode (Player Mode): follow the device's own rotation sensor instead of the
+                 * manifest's landscape lock, so a tablet stood up in portrait shows portrait - and
+                 * turning it round turns the content with it. Off is the signage default: a TV box
+                 * has no sensor worth trusting and must stay landscape. The manifest already claims
+                 * orientation config changes, so switching re-lays the canvas without recreating
+                 * the Activity or interrupting playback.
+                 */
+                val settings by store.settings.collectAsStateWithLifecycle()
+                val tabletMode = settings?.tabletMode == AmsConstants.ACTIVE
+                LaunchedEffect(tabletMode) {
+                    requestedOrientation = if (tabletMode) {
+                        ActivityInfo.SCREEN_ORIENTATION_FULL_USER
+                    } else {
+                        ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                    }
+                }
 
                 RotatedCanvas(rotation, Modifier.fillMaxSize().background(Color.Black)) {
                     if (paired) {

@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">AMS Player</string>
+    <!-- app_name comes from the build flavor (app/build.gradle.kts, resValue). -->
 
     <!-- Pairing -->
     <string name="pair_title">Pair this screen</string>

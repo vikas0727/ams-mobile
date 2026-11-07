@@ -274,11 +274,7 @@ class SettingsApplier(
             skipped += "device owner (set during provisioning, not at runtime)"
         }
 
-        // A layout density hint for handheld builds. This player draws one full-screen canvas on a
-        // fixed panel, so there is no second layout for it to select.
-        if (settings.tabletMode == AmsConstants.ACTIVE) {
-            skipped += "tablet mode (the player renders one full-screen canvas)"
-        }
+        // Tablet mode is applied by MainActivity (sensor-driven orientation), not here.
     }
 
     /* ── policy reads ───────────────────────────────────────────────────────

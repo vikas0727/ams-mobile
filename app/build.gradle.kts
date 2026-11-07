@@ -38,10 +38,11 @@ if (firebaseConfigured) {
  * defaults so a fresh clone still configures; a build with the placeholder key will fail to decrypt
  * any response, which is the intended loud failure rather than a silent wrong one.
  *
- * Required keys in local.properties:
- *   digi.apiBaseUrl=http://10.0.2.2:5000/api/v1/
- *   digi.aesSecretKey=<the backend's AES_SECRET_KEY, verbatim>
- *   digi.aesIv=<the backend's AES_IV, 32 hex chars>
+ * Keys in local.properties:
+ *   ams.<flavor>.apiBaseUrl=...    per build: ams.dev.apiBaseUrl, ams.uat.apiBaseUrl, ams.prod.apiBaseUrl
+ *   digi.apiBaseUrl=...            older single address, still read when no per-flavor one is set
+ *   digi.aesSecretKey=<the backend's AES_SECRET_KEY, verbatim>   legacy v1 envelope only
+ *   digi.aesIv=<the backend's AES_IV, 32 hex chars>               legacy v1 envelope only
  *   digi.aesEnabled=true
  */
 val localProps = Properties().apply {
@@ -51,6 +52,41 @@ val localProps = Properties().apply {
 
 fun buildValue(key: String, fallback: String): String =
     (localProps.getProperty(key) ?: project.findProperty(key) as String? ?: fallback).trim()
+
+/*
+ * The three builds - dev, uat, prod - as product flavors. Each carries its own API address, its own
+ * public encryption key and its own app name, so choosing an environment is choosing a Gradle task:
+ *
+ *   ./gradlew assembleProdRelease     ->  app/build/outputs/apk/prod/release/app-prod-release.apk
+ *   ./gradlew assembleUatRelease      ->  app/build/outputs/apk/uat/release/app-uat-release.apk
+ *   ./gradlew assembleDevDebug        ->  app/build/outputs/apk/dev/debug/app-dev-debug.apk
+ *
+ * The address comes from `ams.<flavor>.apiBaseUrl` in local.properties, else the older
+ * `digi.apiBaseUrl`, else the default below. UAT and PROD have no committed default: set them in
+ * local.properties (https - release builds are HTTPS-only). The public key comes from the committed
+ * crypto-server-keys.properties (written by the backend's `npm run crypto:keys`), by flavor name;
+ * `ams.<flavor>.cryptoServerKey` overrides.
+ *
+ * All three keep the same application id, so a box holds one of them at a time - installing
+ * another replaces it, and a box already paired with this app keeps its pairing.
+ */
+data class PlayerEnv(val name: String, val apiBaseUrl: String, val appName: String)
+
+val playerEnvs = listOf(
+    // The emulator's alias for this machine. Plain http, so use the debug build (release is HTTPS-only).
+    PlayerEnv("dev", "http://10.0.2.2:5000/api/v1/", "AMS Player Dev"),
+    PlayerEnv("uat", "https://set-ams.uat.apiBaseUrl-in-local.properties.invalid/api/v1/", "AMS Player UAT"),
+    PlayerEnv("prod", "https://set-ams.prod.apiBaseUrl-in-local.properties.invalid/api/v1/", "AMS Player"),
+)
+
+val committedServerKeys = Properties().apply {
+    val f = rootProject.file("crypto-server-keys.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+
+/** `ams.<env>.<name>` from local.properties or -P, else the fallback. */
+fun envValue(env: String, name: String, fallback: String): String =
+    (localProps.getProperty("ams.$env.$name") ?: project.findProperty("ams.$env.$name") as String? ?: fallback).trim()
 
 android {
     namespace = "com.example.digi"
@@ -65,13 +101,33 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        buildConfigField("String", "API_BASE_URL", "\"${buildValue("digi.apiBaseUrl", "http://10.0.2.2:5000/api/v1/")}\"")
         buildConfigField("String", "AES_SECRET_KEY", "\"${buildValue("digi.aesSecretKey", "CHANGE_ME")}\"")
         buildConfigField("String", "AES_IV", "\"${buildValue("digi.aesIv", "00000000000000000000000000000000")}\"")
         buildConfigField("boolean", "AES_ENABLED", buildValue("digi.aesEnabled", "true"))
         // Lets the app say "Firebase: not configured in this build" on the diagnostics overlay
         // rather than "not reporting", which reads like a fault.
         buildConfigField("boolean", "FIREBASE_CONFIGURED", firebaseConfigured.toString())
+    }
+
+    // API_BASE_URL, CRYPTO_SERVER_KEY, APP_ENV and the app name come from the flavor - see playerEnvs.
+    flavorDimensions += "env"
+    productFlavors {
+        playerEnvs.forEach { env ->
+            create(env.name) {
+                dimension = "env"
+                if (env.name != "prod") versionNameSuffix = "-${env.name}"
+                buildConfigField("String", "APP_ENV", "\"${env.name}\"")
+                buildConfigField(
+                    "String", "API_BASE_URL",
+                    "\"${envValue(env.name, "apiBaseUrl", buildValue("digi.apiBaseUrl", env.apiBaseUrl))}\"",
+                )
+                buildConfigField(
+                    "String", "CRYPTO_SERVER_KEY",
+                    "\"${envValue(env.name, "cryptoServerKey", committedServerKeys.getProperty(env.name, ""))}\"",
+                )
+                resValue("string", "app_name", env.appName)
+            }
+        }
     }
 
     buildTypes {
@@ -100,6 +156,8 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+        // The per-flavor app name is a resValue.
+        resValues = true
     }
     packaging {
         resources {

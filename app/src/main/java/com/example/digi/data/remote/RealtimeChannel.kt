@@ -116,11 +116,12 @@ class RealtimeChannel(
 
         runCatching {
             val options = IO.Options.builder()
-                // Long-polling first, upgrading to WebSocket if the path allows it. The other way
-                // round looks faster and is worse here: on a network that silently drops WS the
-                // handshake stalls for the full timeout on every attempt, where polling would have
-                // connected immediately and simply stayed on polling.
-                .setTransports(arrayOf("polling", "websocket"))
+                // WebSocket first. The server runs as several workers (PM2 cluster) and there a
+                // long-polling session's requests would be spread across workers that know nothing
+                // of it, so the server only accepts WebSocket. Polling stays listed for a server
+                // that still allows it; on a network that drops WS the channel stays down and
+                // everything is delivered by the HTTP polling the player already does.
+                .setTransports(arrayOf("websocket", "polling"))
                 .setReconnection(true)
                 // Capped backoff. A fleet reconnecting in lockstep after a shared outage is a
                 // thundering herd against the same server the heartbeats are hitting.
