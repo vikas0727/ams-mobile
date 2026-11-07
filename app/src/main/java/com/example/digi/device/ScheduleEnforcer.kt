@@ -20,9 +20,11 @@ import java.time.ZonedDateTime
  *
  * Three rules that are easy to get backwards and each have a comment where they are implemented:
  *
- *  1. A turn-off row names the window the screen is **OFF**. Its `startTime` is `powerOffAt`.
- *     Reversed, a screen sits dark through exactly the hours it should be running and the stored
- *     settings still look perfectly reasonable.
+ *  1. What a row means depends on `screenTurnOffScheduleMode`. PLAY_HOURS (what the CMS saves
+ *     now): the row is when the screen PLAYS - "09:00 to 20:00" - and outside every row it is off.
+ *     OFF_WINDOW or unset (screens saved earlier): the row is when the screen is OFF and its
+ *     `startTime` is `powerOffAt`. Reversed, a screen sits dark through exactly the hours it
+ *     should be running and the stored settings still look perfectly reasonable.
  *  2. An empty `days` array means **every day**, not no days. A rule with nothing selected that
  *     silently never fired would be indistinguishable from a bug.
  *  3. Times are wall-clock in `settings.timezone`, evaluated against the server-corrected clock. A
@@ -64,6 +66,9 @@ class ScheduleEnforcer {
      */
     private fun inTurnOffWindow(settings: SettingsDto, local: ZonedDateTime): String? {
         if (settings.screenTurnOffScheduleEnabled != AmsConstants.ACTIVE) return null
+        if (settings.screenTurnOffScheduleMode.equals(PLAY_HOURS, ignoreCase = true)) {
+            return outsidePlayHours(settings, local)
+        }
 
         val rows = settings.screenTurnOffSchedules.orEmpty()
             .mapNotNull { row ->
@@ -86,6 +91,27 @@ class ScheduleEnforcer {
             }
         }
         return null
+    }
+
+    /**
+     * Play-hours mode: on while any row covers [local], off otherwise.
+     *
+     * A row with no usable times is ignored. If no row is usable at all the screen stays ON:
+     * a half-typed schedule must never black out a screen around the clock.
+     */
+    private fun outsidePlayHours(settings: SettingsDto, local: ZonedDateTime): String? {
+        val rows = settings.screenTurnOffSchedules.orEmpty()
+            .mapNotNull { row ->
+                val start = parseTime(row.startTime) ?: return@mapNotNull null
+                val end = parseTime(row.endTime) ?: return@mapNotNull null
+                if (start == end) return@mapNotNull null
+                Triple(row.days.orEmpty(), start, end)
+            }
+        if (rows.isEmpty()) return null
+        if (rows.any { (days, start, end) -> matches(days, start, end, local) }) return null
+        return "outside play hours " + rows.joinToString("; ") { (days, start, end) ->
+            "${fmt(start)}–${fmt(end)}" + (if (days.isEmpty()) " (every day)" else " (${days.joinToString(",")})")
+        }
     }
 
     /**
@@ -206,5 +232,6 @@ class ScheduleEnforcer {
     private companion object {
         const val TAG = "ScheduleEnforcer"
         const val DEFAULT_ZONE = "Asia/Kolkata"
+        const val PLAY_HOURS = "PLAY_HOURS"
     }
 }

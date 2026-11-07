@@ -73,7 +73,7 @@ object DeviceController {
      */
     fun setPanelRotation(context: Context, degrees: Int): Outcome {
         if (!canWriteSystemSettings(context)) {
-            return Outcome.failed("WRITE_SETTINGS not granted; the app canvas was rotated instead")
+            return Outcome.failed("WRITE_SETTINGS not granted")
         }
         val value = when (degrees) {
             0 -> Surface.ROTATION_0
@@ -239,33 +239,44 @@ object DeviceController {
      * panel still burns power and still glows in a dark station concourse.
      */
     fun setDisplayPower(context: Context, on: Boolean): Outcome {
+        // Waking the box's OWN display comes first and is no longer skipped when CEC is present.
+        // It used to run only on boxes without CEC — but CEC standby is exactly what lets a box
+        // follow the TV to sleep, and "Image View On" wakes the TV, not the box. The panel came
+        // back on to a sleeping box: no picture, and nothing the schedule could do about it.
+        if (on) wakeDisplay(context)
+
         val cec = runCatching {
             val node = java.io.File("/sys/class/cec/cmd")
             if (node.canWrite()) {
-                // CEC opcode 0x36 = Standby, 0x04 = Image View On, broadcast from the playback device.
-                node.writeText(if (on) "40 04" else "4f 36")
+                // CEC opcode 0x36 = Standby, 0x04 = Image View On, from the playback device.
+                // Standby is addressed to the TV (0) rather than broadcast (F): a broadcast also
+                // puts every other device on the bus to sleep, this box's own CEC stack included.
+                node.writeText(if (on) "40 04" else "40 36")
                 true
             } else false
         }.getOrDefault(false)
 
         if (cec) return Outcome.ok(if (on) "Display woken over HDMI-CEC" else "Display put to standby over HDMI-CEC")
 
-        if (on) {
-            runCatching {
-                val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
-                @Suppress("DEPRECATION")
-                val wl = pm.newWakeLock(
-                    PowerManager.FULL_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
-                    "digi:power-on",
-                )
-                wl.acquire(3_000)
-                wl.release()
-            }
-        }
         return Outcome.partial(
             if (on) "Playback resumed (no CEC control on this box)"
             else "Screen blanked and muted in-app (no CEC control on this box)"
         )
+    }
+
+    /** Turn the box's own screen on if it has gone to sleep. */
+    private fun wakeDisplay(context: Context) {
+        runCatching {
+            val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+            @Suppress("DEPRECATION")
+            val wl = pm.newWakeLock(
+                PowerManager.FULL_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                "digi:power-on",
+            )
+            // Held briefly, long enough for the Activity to come forward and re-assert
+            // FLAG_KEEP_SCREEN_ON, which is what keeps the panel on from then on.
+            wl.acquire(10_000)
+        }.onFailure { AppLog.w(TAG, "Could not wake the display", it) }
     }
 
     /* ── keeping the panel awake ───────────────────────────────────────────── */

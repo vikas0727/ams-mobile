@@ -126,6 +126,20 @@ class MainActivity : ComponentActivity(), PlayerHost {
                         )
                     }
 
+                    // In-app visual dimmer overlay for platforms (like Android TV) that do not support
+                    // hardware display backlight adjustment via WindowManager or WRITE_SETTINGS.
+                    val currentBrightness by inAppBrightness.collectAsStateWithLifecycle()
+                    val dimAlpha = if (currentBrightness < 100) {
+                        ((100 - currentBrightness) / 100f * 0.95f).coerceIn(0f, 0.95f)
+                    } else 0f
+                    if (dimAlpha > 0f) {
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .background(Color.Black.copy(alpha = dimAlpha))
+                        )
+                    }
+
                     val askingForPin by pinPrompt.collectAsStateWithLifecycle()
                     if (askingForPin) {
                         PinGate(
@@ -180,10 +194,17 @@ class MainActivity : ComponentActivity(), PlayerHost {
      * Seeded from the last applied value so a cold start comes up the right way round rather than
      * showing landscape for a beat and then swinging in front of whoever is watching.
      */
-    private val appRotation by lazy { MutableStateFlow(DigiApp.graph(this).store.appRotationDegrees) }
+    private val appRotation get() = DigiApp.graph(this).store.appRotation
 
+    /*
+     * The canvas follows PlayerStore directly. It used to keep its own copy, seeded once from the
+     * store and then only updated through this callback — so a rotation applied while the Activity
+     * was not registered as the PlayerHost (the service's first pass at start-up, or while the
+     * player was backgrounded) reached the store but never the screen, and stayed wrong until the
+     * app was restarted, because the next heartbeat saw the setting unchanged and skipped it.
+     */
     override fun applyAppRotation(degrees: Int) {
-        appRotation.value = if (degrees in setOf(0, 90, 180, 270)) degrees else 0
+        DigiApp.graph(this).store.appRotationDegrees = degrees
     }
 
     override fun onResume() {
@@ -464,13 +485,25 @@ class MainActivity : ComponentActivity(), PlayerHost {
         return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { frameBitmap = it }
     }
 
+    /*
+     * Brightness as an in-app dimmer as well as the window attribute. Android TV boxes ignore the
+     * window's screenBrightness and have no backlight setting an app may write, so the CMS
+     * Brightness slider used to do nothing on them.
+     */
+    private val inAppBrightness by lazy {
+        MutableStateFlow(DigiApp.graph(this).store.loadSettings()?.brightness ?: 100)
+    }
+
     /**
      * Window attributes are main-thread-only and the caller here is the command executor running on
      * the service's IO loop, so this hops threads rather than touching the window from wherever it
      * happens to be called.
      */
     override fun applyWindowBrightness(level: Int) {
-        runOnUiThread { DeviceController.applyWindowBrightness(this, level) }
+        runOnUiThread {
+            inAppBrightness.value = level.coerceIn(0, 100)
+            DeviceController.applyWindowBrightness(this, level)
+        }
     }
 
     override fun setBlanked(blanked: Boolean) {

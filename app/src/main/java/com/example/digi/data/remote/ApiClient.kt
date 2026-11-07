@@ -43,6 +43,8 @@ object ApiClient {
         // this API from logcat is bearable at all.
         level = if (BuildConfig.DEBUG) HttpLoggingInterceptor.Level.BODY
         else HttpLoggingInterceptor.Level.BASIC
+        // The player token is a credential; logcat is readable by anyone with adb on the box.
+        redactHeader("Authorization")
     }
 
     fun create(tokenProvider: () -> String?): PlayerApi {

@@ -224,4 +224,22 @@ class PlaybackEngineTest {
         val cycleTwo = PlaybackEngine.frameAt(p, 37_000, 0)!!
         assertEquals(1, cycleTwo.cycleIndex)
     }
+
+    @Test
+    fun `a short single-clip zone reports a new pass each time it wraps inside the layout`() {
+        // L-bar: a 30s main zone with a 10s sidebar clip. The sidebar's slide index is 0 for the
+        // whole layout, so the renderer can only restart it if the engine reports the wrap.
+        val p = plan(listOf(layout("l1", 30, zone("main", slide("m", 30)), zone("side", slide("s", 10)))))
+
+        fun side(ms: Long) = PlaybackEngine.frameAt(p, ms, 0)!!.zones[1]
+
+        assertEquals(0L, side(5_000).passIndex)
+        assertEquals(1L, side(15_000).passIndex)
+        assertEquals(2L, side(25_000).passIndex)
+        assertEquals(0, side(15_000).slideIndex)
+        assertNotEquals(
+            PlaybackEngine.frameAt(p, 5_000, 0)!!.signature,
+            PlaybackEngine.frameAt(p, 15_000, 0)!!.signature,
+        )
+    }
 }

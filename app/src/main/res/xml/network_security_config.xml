@@ -1,15 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Cleartext is permitted so the player can talk to a development backend on http://<lan-ip>:5000
-    and to the loopback alias an emulator uses. Production S3 media and a production API are HTTPS;
-    tighten this to <domain-config cleartextTrafficPermitted="false"> once the deployment has a
-    certificate.
+    RELEASE: HTTPS only, and only the system's certificate authorities.
+
+    This used to allow plain http and trust USER-installed CAs in every build. On a box in a public
+    place that means anyone with a minute at the remote could install their own CA and read the
+    player's bearer token and its traffic. Payload encryption protects bodies, but not headers - so
+    TLS has to be real. A release build therefore needs an https API_BASE_URL and https media URLs.
+
+    Development against an http backend uses a DEBUG build, whose overlay in src/debug relaxes this.
 -->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="true">
+    <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
-            <certificates src="user" />
         </trust-anchors>
     </base-config>
 </network-security-config>

@@ -82,6 +82,14 @@ class PlanBuilder(private val cache: MediaCache) {
             shuffle = (manifest.shuffle ?: AmsConstants.INACTIVE) == AmsConstants.ACTIVE,
             layouts = layouts,
             missingAssets = missing,
+            // A wall in "One playlist" mode plays the ordinary playlist shape, but it is still a wall:
+            // without this the player counted its loop from the moment IT adopted the plan, so every
+            // screen started at a different point and "Play in sync" did nothing at all.
+            cluster = if (sync.contentSource == AmsConstants.ContentSource.CLUSTER_PLAYLIST) {
+                clusterPlanOf(sync, layouts.sumOf { it.durationMs }.coerceAtLeast(1L))
+            } else {
+                null
+            },
         )
     }
 
@@ -240,16 +248,7 @@ class PlanBuilder(private val cache: MediaCache) {
             shuffle = false,   // a wall grid is choreographed; shuffling it is meaningless
             layouts = listOf(layout),
             missingAssets = missing,
-            cluster = ClusterPlan(
-                clusterId = sync.cluster?.id,
-                clusterName = sync.cluster?.name,
-                batchId = batch?.id,
-                position = batch?.position,
-                isMaster = batch?.isMaster ?: false,
-                syncEnabled = sync.cluster?.syncEnabled ?: false,
-                loopOriginAtMs = ServerClock.parseIsoMillis(batch?.loopOriginAt),
-                loopDurationMs = loopMs,
-            ),
+            cluster = clusterPlanOf(sync, loopMs),
         )
     }
 
@@ -277,8 +276,27 @@ class PlanBuilder(private val cache: MediaCache) {
         else -> AmsConstants.MediaType.IMAGE
     }
 
-    private companion object {
+    internal companion object {
         const val TAG = "PlanBuilder"
+
+        /**
+         * The wall this screen belongs to, from the manifest's `cluster` and `batch` blocks: whether
+         * sync is on, and the shared instant every member counts its loop from. Used for both wall
+         * content modes (a slot grid per screen, and one shared playlist).
+         */
+        fun clusterPlanOf(sync: SyncResponse, loopMs: Long): ClusterPlan {
+            val batch = sync.batch
+            return ClusterPlan(
+                clusterId = sync.cluster?.id,
+                clusterName = sync.cluster?.name,
+                batchId = batch?.id,
+                position = batch?.position,
+                isMaster = batch?.isMaster ?: false,
+                syncEnabled = sync.cluster?.syncEnabled ?: false,
+                loopOriginAtMs = ServerClock.parseIsoMillis(batch?.loopOriginAt),
+                loopDurationMs = loopMs,
+            )
+        }
     }
 }
 

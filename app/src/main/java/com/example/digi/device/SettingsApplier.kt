@@ -72,6 +72,28 @@ class SettingsApplier(
     private var lastAppRotation: String? = null
     private var lastPanelRotation: String? = null
 
+    /** The unsupported list as last written to the log; null until the first pass. */
+    private var lastLoggedSkipped: List<String>? = null
+
+    /*
+     * The unsupported list is a property of the device and the CMS settings, not of the pass, so it
+     * comes out identical on every heartbeat. Logging it each time filled the diagnostics overlay's
+     * 400-line ring buffer with one "kiosk mode (needs device-owner provisioning)" line a minute —
+     * kioskMode defaults to ACTIVE on the server, so every screen did it — pushing out the lines
+     * someone at the wall actually needs. It is logged when the list changes, and again when an
+     * operator forces APPLY_CONFIG (where they expect to see the outcome). The heartbeat still
+     * reports the full list every beat through [effective], so the CMS loses nothing.
+     */
+    private fun logSkippedIfChanged(skipped: List<String>, force: Boolean) {
+        val previous = lastLoggedSkipped
+        if (!force && skipped == previous) return
+        lastLoggedSkipped = skipped.toList()
+        when {
+            skipped.isNotEmpty() -> AppLog.i(TAG, "Settings not supported here: ${skipped.joinToString(", ")}")
+            !previous.isNullOrEmpty() -> AppLog.i(TAG, "Settings: every setting is now supported on this device")
+        }
+    }
+
     /**
      * @param settings what the CMS holds; null is a no-op rather than a reset to defaults
      * @param force    re-assert everything even where the cached value already matches
@@ -84,12 +106,11 @@ class SettingsApplier(
 
         applyVolume(settings, force, applied)
         applyBrightness(settings, force, applied)
-        applyAppRotation(settings, force, applied)
-        applyPanelRotation(settings, force, applied, skipped)
+        applyRotation(settings, force, applied)
         noteUnsupported(settings, skipped)
 
         if (applied.isNotEmpty()) AppLog.i(TAG, "Settings: ${applied.joinToString(", ")}")
-        if (skipped.isNotEmpty()) AppLog.i(TAG, "Settings not supported here: ${skipped.joinToString(", ")}")
+        logSkippedIfChanged(skipped, force)
 
         val result = Result(applied, skipped)
         lastResult = result
@@ -137,6 +158,7 @@ class SettingsApplier(
         val volume = settings.volume ?: return
         if (!force && volume == lastVolume) return
 
+        store.updateVolume(volume)
         val outcome = DeviceController.setVolume(context, volume)
         if (!outcome.success) {
             AppLog.w(TAG, "Volume ${volume}% not applied: ${outcome.detail} — will retry next beat")
@@ -178,48 +200,53 @@ class SettingsApplier(
     }
 
     /**
-     * Rotate the app's own canvas.
+     * Apply screen / app rotation — always by rotating the app canvas.
      *
-     * This is the setting an operator is most likely to notice doing nothing, because the result is
-     * supposed to be unmissable: they pick Portrait in the portal and expect the wall to turn. It
-     * was never wired to anything.
+     * Handles both `rotationScreen` ("Rotation Screen", General Settings) and `builtInAppRotation`
+     * ("Built-in App Rotation", Player Settings).
      *
-     * Done by rotating what the player draws rather than by asking Android to change orientation.
-     * `requestedOrientation` is advisory — plenty of TV boxes lock themselves to landscape and
-     * ignore it, and the ones that honour it recreate the Activity, which restarts playback. A
-     * canvas rotation works everywhere and costs nothing.
+     * This used to write the system's USER_ROTATION whenever WRITE_SETTINGS was held and, when that
+     * write "succeeded", set the canvas back to 0°. It never turned anything: MainActivity is
+     * declared `screenOrientation="landscape"` in the manifest, so the system keeps this app
+     * landscape whatever USER_ROTATION says, and TV boxes ignore USER_ROTATION outright. The result
+     * was a screen reporting "panel rotation 90°" while showing the picture unrotated — on exactly
+     * the boxes that had been granted the permission. It also changed a device-wide setting behind
+     * the operator's back. The canvas rotation (MainActivity.RotatedCanvas) is the only thing that
+     * reliably turns the picture on every box, so it is now the only mechanism.
+     *
+     * Precedence is unchanged: an explicit non-zero Built-in App Rotation wins, otherwise Rotation
+     * Screen decides.
      */
-    private fun applyAppRotation(settings: SettingsDto, force: Boolean, applied: MutableList<String>) {
-        val rotation = settings.builtInAppRotation ?: return
-        if (!force && rotation == lastAppRotation) return
-        lastAppRotation = rotation
-        val degrees = rotation.toRotationDegrees() ?: return
-        PlayerHost.current()?.applyAppRotation(degrees)
-        store.appRotationDegrees = degrees
-        applied += "app rotation ${degrees}°"
-    }
-
-    /**
-     * Rotate the physical panel.
-     *
-     * Needs WRITE_SETTINGS, which an unprovisioned box does not grant. When it is not held this is
-     * reported as unsupported rather than swallowed — the canvas rotation above is the setting that
-     * actually turns the picture, and an operator needs to know which of the two took effect.
-     */
-    private fun applyPanelRotation(
+    private fun applyRotation(
         settings: SettingsDto,
         force: Boolean,
         applied: MutableList<String>,
-        skipped: MutableList<String>,
     ) {
-        val rotation = settings.rotationScreen ?: return
-        if (!force && rotation == lastPanelRotation) return
-        lastPanelRotation = rotation
-        val degrees = rotation.toRotationDegrees() ?: return
+        val panelRotation = settings.rotationScreen
+        val appRotation = settings.builtInAppRotation
 
-        val outcome = DeviceController.setPanelRotation(context, degrees)
-        if (outcome.success) applied += "panel rotation ${degrees}°"
-        else skipped += "panel rotation (${outcome.detail})"
+        if (!force && panelRotation == lastPanelRotation && appRotation == lastAppRotation) return
+        lastPanelRotation = panelRotation
+        lastAppRotation = appRotation
+
+        val panelDegrees = panelRotation?.toRotationDegrees()
+        val appDegrees = appRotation?.toRotationDegrees()
+
+        val targetCanvasDegrees = when {
+            appDegrees != null && appDegrees != 0 -> appDegrees
+            panelDegrees != null -> panelDegrees
+            appDegrees != null -> appDegrees
+            else -> 0
+        }
+
+        // The store is what the canvas observes (MainActivity collects store.appRotation), so this
+        // takes effect whether or not the Activity is in the foreground right now.
+        store.appRotationDegrees = targetCanvasDegrees
+        PlayerHost.current()?.applyAppRotation(targetCanvasDegrees)
+
+        if (panelDegrees != null || appDegrees != null) {
+            applied += "screen rotation ${targetCanvasDegrees}°"
+        }
     }
 
     /**
@@ -237,20 +264,8 @@ class SettingsApplier(
         if (settings.lockDeviceSettings == AmsConstants.ACTIVE) skipped += "lock device settings (needs device-owner provisioning)"
         if (settings.defaultLauncher == AmsConstants.ACTIVE) skipped += "default launcher (set at provisioning, not at runtime)"
 
-        // Playback engine choices. ExoPlayer already selects a hardware decoder and falls back to
-        // software on failure, which is what both of these are asking for; there is no second
-        // playback path to switch to, so claiming to honour them would be the dishonest answer.
-        if (settings.nativeVideoPlayer == AmsConstants.ACTIVE) {
-            skipped += "native video player (this build always uses the platform decoder via ExoPlayer)"
-        }
-
-        // "Original" vs "Adaptive" picks a rendition to suit the panel and the link. AMS stores one
-        // rendition per media — there is no ABR ladder to choose from — so the setting has nothing
-        // to act on. It is listed rather than ignored so the day renditions do exist, nobody has to
-        // work out why the switch never did anything.
-        if (settings.adaptivePlayback != null && settings.adaptivePlayback != "Adaptive") {
-            skipped += "adaptive playback (media is stored as a single rendition)"
-        }
+        // nativeVideoPlayer and adaptivePlayback are honoured where the zone's player is built
+        // (ui/player/ZoneRenderer.buildZonePlayer).
 
         // A provisioning fact rather than a runtime switch: whether the app was installed as
         // Android's device owner is decided at install time and cannot be changed from here. The

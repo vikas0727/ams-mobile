@@ -180,7 +180,10 @@ class PlayerService : Service() {
              */
             val untilBeat = (beatIntervalMs() - (SystemClock.elapsedRealtime() - lastBeatAt))
                 .coerceAtLeast(0L)
-            val wait = minOf(TICK_MS, untilBeat).coerceAtLeast(MIN_LOOP_WAIT_MS)
+            // Close to a scheduled on/off moment the tick runs every second, so the switch lands
+            // within a second of the minute instead of up to ten seconds late.
+            val tickMs = if (switchDueSoon) FINE_TICK_MS else TICK_MS
+            val wait = minOf(tickMs, untilBeat).coerceAtLeast(MIN_LOOP_WAIT_MS)
 
             // A push nudge short-circuits the wait, so a content change that arrives over the
             // socket is acted on in the same second rather than at the next tick boundary.
@@ -370,6 +373,16 @@ class PlayerService : Service() {
         if (graph.store.realtimeCaptureEnabled) graph.events.flush()
     }
 
+    /** The panel was woken ahead of the end of this turn-off window (see [tick]). */
+    private var prewoken = false
+    /** An on/off switch is due within one normal tick - tick every second until it lands. */
+    @Volatile private var switchDueSoon = false
+
+    /** What the current PlayerHost has been told, so [tick] can re-deliver to a new one. */
+    private var deliveredHostId: Int? = null
+    private var deliveredBlanked: Boolean? = null
+    private var deliveredBrightness: Int? = null
+
     /**
      * The 10-second pass: schedules and hardware settings.
      *
@@ -381,7 +394,31 @@ class PlayerService : Service() {
         val settings = graph.store.loadSettings() ?: return
 
         val decision = graph.schedules.evaluate(settings)
-        if (decision.displayOn != state.value.displayOn) {
+
+        /*
+         * Pre-wake. A TV coming out of HDMI-CEC standby takes 10-30 s before it shows a picture, so
+         * waking it AT the end of a turn-off window put content back on the wall a good half minute
+         * late - "the window ended at 22:00 and the screen came back at 22:01". The panel is now
+         * powered up PREWAKE_MS early while the app keeps drawing black, and the content returns
+         * on the minute. Once per window.
+         */
+        val now = ServerClock.now()
+        if (!state.value.displayOn && !decision.displayOn) {
+            if (!prewoken && graph.schedules.evaluate(settings, now + PREWAKE_MS).displayOn) {
+                prewoken = true
+                AppLog.i(TAG, "Turn-off window ends within ${PREWAKE_MS / 1000}s - waking the panel early (content stays black until then)")
+                DeviceController.setDisplayPower(this, true)
+                DeviceController.bringToFront(this)
+            }
+        } else {
+            prewoken = false
+        }
+        // Is an on/off switch due before the next normal tick? Then tick every second until it lands.
+        switchDueSoon = graph.schedules.evaluate(settings, now + TICK_MS).displayOn != decision.displayOn
+            || (!decision.displayOn && prewoken)
+
+        val displayChanged = decision.displayOn != state.value.displayOn
+        if (displayChanged) {
             AppLog.i(TAG, "Display ${if (decision.displayOn) "on" else "off"} — ${decision.reason}")
             graph.events.appEvent(
                 action = if (decision.displayOn) AmsConstants.LogAction.POWER_ON_SCHEDULE
@@ -389,17 +426,48 @@ class PlayerService : Service() {
                 status = decision.reason,
             )
             state.value = state.value.copy(displayOn = decision.displayOn)
-            PlayerHost.current()?.setBlanked(!decision.displayOn)
             DeviceController.setDisplayPower(this, decision.displayOn)
+            // Coming out of a turn-off window, the box may have slept with the panel, which stops
+            // the Activity. Pull the player back up so there is something to un-blank.
+            if (decision.displayOn) DeviceController.bringToFront(this)
         }
 
         // Brightness from a schedule overrides the flat setting while its window is open.
-        decision.brightness?.let { level ->
-            if (level != state.value.appliedBrightness) {
-                state.value = state.value.copy(appliedBrightness = level)
-                DeviceController.setSystemBrightness(this, level)
-                PlayerHost.current()?.applyWindowBrightness(level)
+        val level = decision.brightness
+        if (level != null && level != state.value.appliedBrightness) {
+            state.value = state.value.copy(appliedBrightness = level)
+            DeviceController.setSystemBrightness(this, level)
+        }
+
+        /*
+         * The in-app half — blanking and the window dim — is delivered to whichever Activity is the
+         * PlayerHost NOW, and delivered again whenever that changes.
+         *
+         * It used to be sent once, at the moment a window opened or closed, through
+         * `PlayerHost.current()?.`. When no Activity was registered at that instant — the panel had
+         * gone to standby and taken the Activity with it, or it was being recreated — the call was
+         * a silent no-op, the service still recorded the new state, and nothing ever retried. The
+         * screen then sat black (or at 3%) long after the window had closed, which reads on the
+         * wall as "the schedule broke the screen". Re-delivering on a host change makes it
+         * self-correcting within one tick.
+         */
+        val host = PlayerHost.current()
+        if (host != null) {
+            val hostId = System.identityHashCode(host)
+            val newHost = hostId != deliveredHostId
+            val blanked = !decision.displayOn
+            if (newHost || displayChanged || deliveredBlanked != blanked) {
+                host.setBlanked(blanked)
+                deliveredBlanked = blanked
             }
+            if (level != null && (newHost || deliveredBrightness != level)) {
+                host.applyWindowBrightness(level)
+                deliveredBrightness = level
+            }
+            deliveredHostId = hostId
+        } else {
+            // Nothing to deliver to; the next host that registers gets the current state.
+            deliveredHostId = null
         }
 
         // A FULL process restart here, unlike the RESTART_APP command, and deliberately so. This is
@@ -706,6 +774,10 @@ class PlayerService : Service() {
         private const val CHANNEL_ID = "digi_playback"
         private const val NOTIFICATION_ID = 1001
         private const val TICK_MS = 10_000L
+        /** The tick while a scheduled on/off switch is about to happen. */
+        private const val FINE_TICK_MS = 1_000L
+        /** How early the panel is woken before a turn-off window ends: covers a TV's CEC wake-up. */
+        private const val PREWAKE_MS = 45_000L
 
         /** A floor on the loop's wait, so a miscomputed interval can never spin it. */
         private const val MIN_LOOP_WAIT_MS = 500L

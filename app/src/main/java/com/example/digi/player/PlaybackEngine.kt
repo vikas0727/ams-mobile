@@ -34,7 +34,7 @@ object PlaybackEngine {
         val signature: String
             get() = buildString {
                 append(cycleIndex).append('|').append(layoutIndex)
-                zones.forEach { append('|').append(it.zone.key).append(':').append(it.slideIndex) }
+                zones.forEach { append('|').append(it.zone.key).append(':').append(it.slideIndex).append('#').append(it.passIndex) }
             }
     }
 
@@ -45,6 +45,10 @@ object PlaybackEngine {
         /** How far into this slide we are — what a video seeks to when it starts or restarts. */
         val offsetInSlideMs: Long,
         val remainingMs: Long,
+        /** How many times this zone's own slide list has wrapped inside the current layout pass.
+         *  A zone shorter than its layout loops; with a single clip the slide index never changes
+         *  across that wrap, so this is the only signal that tells the renderer to restart it. */
+        val passIndex: Long = 0,
     )
 
     /**
@@ -126,6 +130,7 @@ object PlaybackEngine {
         if (slides.isEmpty()) return ZoneFrame(zone, -1, null, 0, 0)
 
         val total = slides.sumOf { it.durationMs }.coerceAtLeast(1L)
+        val pass = offsetInLayoutMs / total
         var cursor = offsetInLayoutMs % total
 
         for ((index, slide) in slides.withIndex()) {
@@ -136,6 +141,7 @@ object PlaybackEngine {
                     slide = slide,
                     offsetInSlideMs = cursor,
                     remainingMs = slide.durationMs - cursor,
+                    passIndex = pass,
                 )
             }
             cursor -= slide.durationMs
@@ -143,7 +149,7 @@ object PlaybackEngine {
         // Only reachable through floating-point rounding in the durations; land on the last slide
         // rather than returning nothing and blanking the zone.
         val lastIndex = slides.lastIndex
-        return ZoneFrame(zone.copy(slides = slides), lastIndex, slides[lastIndex], 0, 0)
+        return ZoneFrame(zone.copy(slides = slides), lastIndex, slides[lastIndex], 0, 0, pass)
     }
 
     /**

@@ -127,6 +127,9 @@ class RealtimeChannel(
                 .setReconnectionDelay(5_000)
                 .setReconnectionDelayMax(60_000)
                 .setRandomizationFactor(0.5)
+                // Proves which screen this is. The server only accepts playback reports from a
+                // socket that authenticated this way, and only for its own screen.
+                .setAuth(mapOf("token" to (store.playerToken ?: "")))
                 .build()
 
             val client = IO.socket(URI.create(socketOrigin(baseUrl)), options)

@@ -41,6 +41,8 @@ data class SettingsDto(
     val autoRestartAt: String? = null,
 
     val screenTurnOffScheduleEnabled: Int? = null,
+    /** "PLAY_HOURS": rows are when the screen plays. "OFF_WINDOW" or null: rows are when it is off. */
+    val screenTurnOffScheduleMode: String? = null,
     val screenTurnOffSchedules: List<TurnOffScheduleDto>? = null,
     // Legacy single pair, still written by the CMS and mirrored from row one of the list above.
     // Read only as a fallback: a player that understands the arrays should prefer them.

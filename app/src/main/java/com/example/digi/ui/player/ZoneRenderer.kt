@@ -15,6 +15,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
@@ -22,9 +23,14 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
+import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -100,21 +106,50 @@ fun ZoneContent(
     val background = parseColor(zoneFrame.zone.backgroundColor) ?: Color.Transparent
     val slides = zoneFrame.zone.slides
 
+    /*
+     * "Fit Content" (General Settings) and the zone's own fitContent flag, honoured.
+     *
+     * Both were carried into the plan and then never read, so switching Fit Content off in the CMS
+     * changed nothing on the wall. On (the default) means "scale content to fill the panel": each
+     * slide's own fitMode applies, which is cover unless the editor said otherwise. Off means do
+     * not scale to fill: every slide is shown whole, letterboxed if its shape differs from the
+     * zone's. Read from the settings flow at draw time, so a change applies on the next heartbeat
+     * without waiting for a re-sync.
+     */
+    val settings by DigiApp.graph(LocalContext.current).store.settings.collectAsStateWithLifecycle()
+    val fitOverride = if (
+        settings?.fitContent == AmsConstants.INACTIVE || !zoneFrame.zone.fitContent
+    ) FIT_CONTAIN else null
+
+    // "Native Video Player" and "Adaptive Playback" (General Settings) change how the decoder is
+    // built, which can only be decided when the player is created - see buildZonePlayer.
+    val decoder = VideoDecoderConfig(
+        hardwareOnly = settings?.nativeVideoPlayer == AmsConstants.ACTIVE,
+        adaptive = settings?.adaptivePlayback != PLAYBACK_ORIGINAL,
+    )
+
     Box(modifier = modifier.background(background)) {
         // The video surface lives for as long as the zone does, underneath everything else. It is
         // built from the zone's whole slide list rather than from the current slide, so it survives
         // every boundary — which is the entire point.
         val videoSlides = remember(slides) { slides.filter { it.isVideo && it.isPlayable } }
         if (videoSlides.isNotEmpty()) {
-            VideoLayer(
+            // Keyed on the decoder settings so changing one rebuilds the layer whole - player,
+            // surface and every effect bound to them - rather than swapping the player out from
+            // under a view and a set of effects still holding the old one. A one-off cut on a
+            // setting change; nothing at all otherwise.
+            key(decoder) { VideoLayer(
                 zoneKey = zoneFrame.zone.key,
                 slides = slides,
                 videoSlides = videoSlides,
                 slideIndex = zoneFrame.slideIndex,
                 startAtMs = zoneFrame.offsetInSlideMs,
                 cycleIndex = cycleIndex,
+                passIndex = zoneFrame.passIndex,
                 muted = muted,
-            )
+                fitOverride = fitOverride,
+                decoder = decoder,
+            ) }
         }
 
         // Images composite above the video. A blank cell is a real, intended state in a cluster
@@ -135,13 +170,13 @@ fun ZoneContent(
             animationSpec = tween(durationMillis = transitionMs),
             label = "imageSlide",
         ) { current ->
-            if (current != null) ImageSlide(current)
+            if (current != null) ImageSlide(current, fitOverride)
         }
     }
 }
 
 @Composable
-private fun ImageSlide(slide: PlanSlide) {
+private fun ImageSlide(slide: PlanSlide, fitOverride: String?) {
     val context = LocalContext.current
     AsyncImage(
         model = ImageRequest.Builder(context)
@@ -152,7 +187,7 @@ private fun ImageSlide(slide: PlanSlide) {
             .crossfade(false)
             .build(),
         contentDescription = slide.name,
-        contentScale = slide.fitMode.toContentScale(),
+        contentScale = (fitOverride ?: slide.fitMode).toContentScale(),
         modifier = Modifier.fillMaxSize(),
     )
 }
@@ -173,7 +208,10 @@ private fun VideoLayer(
     slideIndex: Int,
     startAtMs: Long,
     cycleIndex: Long,
+    passIndex: Long,
     muted: Boolean,
+    fitOverride: String?,
+    decoder: VideoDecoderConfig,
 ) {
     val context = LocalContext.current
 
@@ -197,7 +235,7 @@ private fun VideoLayer(
     }
 
     val player = remember(zoneKey) {
-        ExoPlayer.Builder(context).build().apply {
+        buildZonePlayer(context, decoder).apply {
             // The engine owns timing, not the player. REPEAT_MODE_ALL keeps the last-to-first
             // boundary inside the playlist so that wrap is buffered like any other, and
             // pauseAtEndOfMediaItems stops the player running ahead of the engine on its own.
@@ -237,6 +275,8 @@ private fun VideoLayer(
 
     /** The inflated view, so the swap can control what is shown while it happens. */
     var playerView by remember(zoneKey) { mutableStateOf<PlayerView?>(null) }
+    var hasError by remember(zoneKey, loadedKey) { mutableStateOf(false) }
+    val failedIndices = remember(loadedKey) { mutableSetOf<Int>() }
 
     val targetItem = itemIndexBySlide[slideIndex]
 
@@ -283,7 +323,34 @@ private fun VideoLayer(
         val view = playerView
         val listener = object : Player.Listener {
             override fun onRenderedFirstFrame() {
+                hasError = false
                 view?.setKeepContentOnPlayerReset(true)
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                val currentIndex = player.currentMediaItemIndex
+                AppLog.e(
+                    TAG,
+                    "Playback error in zone $zoneKey at item $currentIndex [${error.errorCodeName} / ${error.errorCode}]: ${error.message}",
+                    error,
+                )
+                failedIndices.add(currentIndex)
+                val totalCount = player.mediaItemCount
+                if (failedIndices.size < totalCount && totalCount > 1) {
+                    // Catch PlaybackException (e.g. NO_EXCEEDS_CAPABILITIES) and automatically skip to next item instead of freezing
+                    AppLog.w(TAG, "Skipping failed media item $currentIndex in zone $zoneKey to next available item")
+                    view?.setKeepContentOnPlayerReset(false)
+                    val nextIndex = (currentIndex + 1) % totalCount
+                    player.seekToDefaultPosition(nextIndex)
+                    player.prepare()
+                    player.play()
+                } else {
+                    // All items failed or single unplayable item: show placeholder instead of freezing
+                    AppLog.w(TAG, "Cannot recover playback for zone $zoneKey; activating placeholder")
+                    hasError = true
+                    view?.setKeepContentOnPlayerReset(false)
+                    player.stop()
+                }
             }
         }
         player.addListener(listener)
@@ -310,7 +377,7 @@ private fun VideoLayer(
      * It costs one extra run of this effect per cycle on every other zone, where the first branch
      * below finds the player already in the right place and does nothing.
      */
-    LaunchedEffect(targetItem, loadedKey, cycleIndex) {
+    LaunchedEffect(targetItem, loadedKey, cycleIndex, passIndex) {
         // The engine has moved on to a playlist the player has not loaded yet. Doing anything here
         // would be applying new indices to old media — the bug this guard exists to prevent.
         if (loadedKey != playlistKey) return@LaunchedEffect
@@ -323,6 +390,11 @@ private fun VideoLayer(
         }
 
         runCatching {
+            // A player that was stop()ped after an error sits in IDLE and ignores play(); put it
+            // back in the ready path so the zone can recover instead of staying dimmed forever.
+            if (player.playbackState == Player.STATE_IDLE && player.mediaItemCount > 0) {
+                player.prepare()
+            }
             val count = player.mediaItemCount
             val current = player.currentMediaItemIndex
 
@@ -378,12 +450,38 @@ private fun VideoLayer(
         }.onFailure { AppLog.e(TAG, "Could not advance zone $zoneKey to item $targetItem", it) }
     }
 
-    LaunchedEffect(muted, targetItem) {
-        val slideMuted = slides.getOrNull(slideIndex)?.muted ?: false
-        player.volume = if (muted || slideMuted) 0f else 1f
+    /*
+     * Recover from a playback error instead of staying disabled.
+     *
+     * An error on a single-clip zone ends in `player.stop()` plus the dimmed placeholder, and
+     * nothing afterwards ever re-prepared it - so one transient failure (typically a hardware
+     * decoder briefly unavailable while the other zones' players hold theirs, or a seek during a
+     * neighbour's clip change) left the sidebar or ticker dead until the playlist changed. Retry
+     * the load every few seconds while the error stands; the first rendered frame clears it.
+     */
+    LaunchedEffect(hasError, loadedKey) {
+        while (hasError && loadedKey == playlistKey) {
+            delay(ERROR_RETRY_MS)
+            runCatching {
+                failedIndices.clear()
+                val items = videoSlides.map { MediaItem.fromUri(File(it.localPath!!).toURI().toString()) }
+                val startIndex = (targetItem ?: 0).coerceIn(0, (items.size - 1).coerceAtLeast(0))
+                player.setMediaItems(items, startIndex, if (startAtMs > SEEK_THRESHOLD_MS) startAtMs else 0L)
+                player.prepare()
+                player.play()
+            }.onFailure { AppLog.e(TAG, "Retry failed for zone $zoneKey", it) }
+        }
     }
 
-    val fitMode = slides.getOrNull(slideIndex)?.fitMode ?: videoSlides.first().fitMode
+    val currentVolume by DigiApp.graph(context).store.currentVolume.collectAsStateWithLifecycle()
+    val volumeFactor = currentVolume.coerceIn(0, 100) / 100f
+
+    LaunchedEffect(muted, targetItem, volumeFactor) {
+        val slideMuted = slides.getOrNull(slideIndex)?.muted ?: false
+        player.volume = if (muted || slideMuted) 0f else volumeFactor
+    }
+
+    val fitMode = fitOverride ?: slides.getOrNull(slideIndex)?.fitMode ?: videoSlides.first().fitMode
 
     /* ── which surface this zone renders through ────────────────────────────
      *
@@ -416,7 +514,9 @@ private fun VideoLayer(
      * screenshot taken here so far has quietly been using. See VideoSurfaces.
      */
     val capturing by VideoSurfaces.textureRequired.collectAsStateWithLifecycle()
-    val wantsTextureView = captureEnabled || mixesImages || capturing
+    val appRotation by DigiApp.graph(context).store.appRotation.collectAsStateWithLifecycle()
+    val isCanvasRotated = appRotation != 0
+    val wantsTextureView = captureEnabled || mixesImages || capturing || isCanvasRotated
 
     /*
      * Latched on, never off, for as long as this zone lives.
@@ -446,52 +546,62 @@ private fun VideoLayer(
     // remembered on zoneKey and survives, so the swap is a surface re-attach — a single frame's
     // blink when an operator opens or closes Live Data View, which is the only time it happens.
     key(needsTextureView) {
-        AndroidView(
-            factory = { ctx ->
-                // Inflated rather than constructed, purely to get at surface_type — see the
-                // comments in those two layouts.
-                val layout = if (needsTextureView) {
-                    R.layout.zone_player_view_capture
-                } else {
-                    R.layout.zone_player_view
-                }
-                val view = LayoutInflater.from(ctx).inflate(layout, null) as PlayerView
-                playerView = view
-                view.apply {
-                    useController = false
-                    // Transparent background: zones overlap by design (a ticker over video is the
-                    // most common signage layout) and an opaque surface would black out whatever is
-                    // beneath.
-                    setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
-                    // Hold the last rendered frame instead of blanking whenever the player is reset
-                    // or its item changes. Without this the view clears itself to nothing at exactly
-                    // the moment we are trying to bridge.
-                    setKeepContentOnPlayerReset(true)
-                    layoutParams = ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                    )
-                    this.player = player
-                }
-            },
-            update = { view ->
-                // Deliberately does NOT reassign the player. Handing a PlayerView a player detaches
-                // the old surface and attaches a new one; doing that on every recomposition is a
-                // black flash several times a second.
-                view.resizeMode = fitMode.toResizeMode()
-            },
-            // Only reached when the surface type flips, or the zone leaves. Detaching the player
-            // from the view being thrown away also unregisters its listener; Media3 ignores the
-            // surface clear when another view has already taken over, so this cannot blank the
-            // incoming one whichever order Compose disposes and creates in.
-            onRelease = { view -> view.player = null },
-            modifier = Modifier
-                .fillMaxSize()
-                // Hidden, not removed, while an image is up — the surface and its decoder survive.
-                // Only meaningful on the TextureView path; a zone that gets here with a SurfaceView
-                // has no images to hide behind, so this is always 1f for it.
-                .alpha(if (targetItem != null) 1f else 0f),
-        )
+        Box(modifier = Modifier.fillMaxSize()) {
+            AndroidView(
+                factory = { ctx ->
+                    // Inflated rather than constructed, purely to get at surface_type — see the
+                    // comments in those two layouts.
+                    val layout = if (needsTextureView) {
+                        R.layout.zone_player_view_capture
+                    } else {
+                        R.layout.zone_player_view
+                    }
+                    val view = LayoutInflater.from(ctx).inflate(layout, null) as PlayerView
+                    playerView = view
+                    view.apply {
+                        useController = false
+                        // Transparent background: zones overlap by design (a ticker over video is the
+                        // most common signage layout) and an opaque surface would black out whatever is
+                        // beneath.
+                        setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+                        // Hold the last rendered frame instead of blanking whenever the player is reset
+                        // or its item changes. Without this the view clears itself to nothing at exactly
+                        // the moment we are trying to bridge.
+                        setKeepContentOnPlayerReset(true)
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                        )
+                        this.player = player
+                    }
+                },
+                update = { view ->
+                    // Deliberately does NOT reassign the player. Handing a PlayerView a player detaches
+                    // the old surface and attaches a new one; doing that on every recomposition is a
+                    // black flash several times a second.
+                    view.resizeMode = fitMode.toVideoResizeMode()
+                },
+                // Only reached when the surface type flips, or the zone leaves. Detaching the player
+                // from the view being thrown away also unregisters its listener; Media3 ignores the
+                // surface clear when another view has already taken over, so this cannot blank the
+                // incoming one whichever order Compose disposes and creates in.
+                onRelease = { view -> view.player = null },
+                modifier = Modifier
+                    .fillMaxSize()
+                    // Hidden, not removed, while an image is up or when error placeholder is active.
+                    // Only meaningful on the TextureView path; a zone that gets here with a SurfaceView
+                    // has no images to hide behind, so this is always 1f for it.
+                    .alpha(if (targetItem != null && !hasError) 1f else 0f),
+            )
+            if (hasError) {
+                // A dimmed placeholder while the zone cannot play; the retry below clears it.
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.5f)),
+                )
+            }
+        }
     }
 }
 
@@ -521,13 +631,16 @@ private fun String.toContentScale(): ContentScale = when (lowercase()) {
     else -> ContentScale.Crop
 }
 
+/**
+ * Video never crops: anything but an explicit stretch shows the whole frame, letterboxed if the
+ * zone's shape differs. The old default ("cover") zoomed the clip to fill the zone and cut off the
+ * edges - the top of a banner video, in particular - and the manifest carries "cover" explicitly
+ * for older slides, so the default alone could not fix content already published.
+ */
 @OptIn(UnstableApi::class)
-private fun String.toResizeMode(): Int = when (lowercase()) {
-    "contain", "fit" -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+private fun String.toVideoResizeMode(): Int = when (lowercase()) {
     "fill", "stretch" -> AspectRatioFrameLayout.RESIZE_MODE_FILL
-    // ZOOM scales until the shorter side fills and crops the overflow — "cover", and what a wall
-    // is expected to do with a clip that is not exactly the panel's shape.
-    else -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+    else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
 }
 
 /** `#RRGGBB` or `#AARRGGBB` from the CMS colour pickers; anything else is treated as unset. */
@@ -550,3 +663,50 @@ private const val DRIFT_TOLERANCE_MS = 1_500L
 private const val CLIP_END_TOLERANCE_MS = 250L
 
 private const val TAG = "ZoneRenderer"
+
+/** How long a zone that hit a playback error waits before trying to load again. */
+private const val ERROR_RETRY_MS = 3_000L
+
+/** Adaptive Playback's other option: always the best quality available, whatever the panel. */
+private const val PLAYBACK_ORIGINAL = "Original"
+
+/**
+ * How a zone's ExoPlayer decodes, from two General Settings.
+ *
+ * @param hardwareOnly "Native Video Player" on: only the device's own hardware (vendor) video
+ *   decoders are used, and a failing one is not swapped for a software decoder. Off (the default)
+ *   ExoPlayer still prefers hardware, but may fall back to a software decoder when the hardware one
+ *   fails to start - which keeps a clip playing on boxes with flaky vendor codecs, at the cost of
+ *   CPU. Turn it on for a box where the software fallback is what stutters.
+ * @param adaptive "Adaptive Playback" Adaptive (the default): when a file or stream carries several
+ *   qualities, pick the one that fits this panel's resolution. Original: always the highest
+ *   quality. Uploaded MP4s carry one quality, so for them both play identically.
+ */
+internal data class VideoDecoderConfig(val hardwareOnly: Boolean, val adaptive: Boolean)
+
+/** Every decoder for a MIME type that runs in hardware - or all of them, if none does (audio). */
+@OptIn(UnstableApi::class)
+private val hardwareOnlySelector = MediaCodecSelector { mimeType, requiresSecure, requiresTunneling ->
+    val all = MediaCodecUtil.getDecoderInfos(mimeType, requiresSecure, requiresTunneling)
+    all.filter { it.hardwareAccelerated }.ifEmpty { all }
+}
+
+@OptIn(UnstableApi::class)
+private fun buildZonePlayer(context: android.content.Context, config: VideoDecoderConfig): ExoPlayer {
+    val renderers = DefaultRenderersFactory(context)
+        .setEnableDecoderFallback(!config.hardwareOnly)
+        .setMediaCodecSelector(if (config.hardwareOnly) hardwareOnlySelector else MediaCodecSelector.DEFAULT)
+    val trackSelector = DefaultTrackSelector(context)
+    val params = trackSelector.buildUponParameters()
+    if (config.adaptive) {
+        params.setViewportSizeToPhysicalDisplaySize(context, true)
+    } else {
+        params.clearViewportSizeConstraints()
+        params.setForceHighestSupportedBitrate(true)
+    }
+    trackSelector.setParameters(params.build())
+    return ExoPlayer.Builder(context, renderers).setTrackSelector(trackSelector).build()
+}
+
+/** The fit mode used when Fit Content is off: show the whole slide, never crop or stretch it. */
+private const val FIT_CONTAIN = "contain"

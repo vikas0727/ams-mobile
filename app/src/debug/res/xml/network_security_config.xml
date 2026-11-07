@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    DEBUG builds only (this file overrides src/main's for the debug variant): plain http for a
+    development backend on http://<lan-ip>:5000 or the emulator's 10.0.2.2, and user-installed CAs
+    so a proxy such as Charles can be used while developing. Release builds never see this.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

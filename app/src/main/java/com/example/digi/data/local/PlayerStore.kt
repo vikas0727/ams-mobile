@@ -104,9 +104,23 @@ class PlayerStore(context: Context) {
      * cached settings blob instead would work, but only after the first composition — the screen
      * would show landscape for a beat and then swing, in front of whoever is standing there.
      */
+    private val _appRotation = MutableStateFlow(prefs.getInt(KEY_APP_ROTATION, 0))
+    val appRotation: StateFlow<Int> get() = _appRotation.asStateFlow()
+
+    private val _currentVolume = MutableStateFlow(readStoredSettings()?.volume ?: 100)
+    val currentVolume: StateFlow<Int> get() = _currentVolume.asStateFlow()
+
+    fun updateVolume(level: Int) {
+        _currentVolume.value = level.coerceIn(0, 100)
+    }
+
     var appRotationDegrees: Int
         get() = prefs.getInt(KEY_APP_ROTATION, 0)
-        set(value) = prefs.edit().putInt(KEY_APP_ROTATION, if (value in ROTATIONS) value else 0).apply()
+        set(value) {
+            val valid = if (value in ROTATIONS) value else 0
+            prefs.edit().putInt(KEY_APP_ROTATION, valid).apply()
+            _appRotation.value = valid
+        }
 
     /**
      * The last retain list the server sent — every cache key this screen is entitled to hold.

@@ -41,6 +41,48 @@ class ScheduleEnforcerTest {
     }
 
     @Test
+    fun `play hours 09-00 to 20-00 - plays in the window, dark after 20-00 and before 09-00`() {
+        val settings = SettingsDto(
+            screenTurnOffScheduleEnabled = AmsConstants.ACTIVE,
+            screenTurnOffScheduleMode = "PLAY_HOURS",
+            screenTurnOffSchedules = listOf(TurnOffScheduleDto(days = emptyList(), startTime = "09:00", endTime = "20:00")),
+            timezone = "Asia/Kolkata",
+        )
+        assertFalse("08:59 should be OFF", enforcer.evaluate(settings, at(11, 8, 59)).displayOn)
+        assertTrue("09:00 should be ON", enforcer.evaluate(settings, at(11, 9)).displayOn)
+        assertTrue("19:59 should be ON", enforcer.evaluate(settings, at(11, 19, 59)).displayOn)
+        assertFalse("20:00 should be OFF", enforcer.evaluate(settings, at(11, 20)).displayOn)
+        assertFalse("20:05 should be OFF", enforcer.evaluate(settings, at(11, 20, 5)).displayOn)
+        assertFalse("02:00 should be OFF", enforcer.evaluate(settings, at(12, 2)).displayOn)
+    }
+
+    @Test
+    fun `play hours - a day not ticked stays dark all day`() {
+        // 2026-09-11 is a Friday, 2026-09-12 a Saturday.
+        val settings = SettingsDto(
+            screenTurnOffScheduleEnabled = AmsConstants.ACTIVE,
+            screenTurnOffScheduleMode = "PLAY_HOURS",
+            screenTurnOffSchedules = listOf(
+                TurnOffScheduleDto(days = listOf("Mon", "Tue", "Wed", "Thu", "Fri"), startTime = "09:00", endTime = "20:00"),
+            ),
+            timezone = "Asia/Kolkata",
+        )
+        assertTrue(enforcer.evaluate(settings, at(11, 12)).displayOn)
+        assertFalse(enforcer.evaluate(settings, at(12, 12)).displayOn)
+    }
+
+    @Test
+    fun `play hours - no usable row keeps the screen on`() {
+        val settings = SettingsDto(
+            screenTurnOffScheduleEnabled = AmsConstants.ACTIVE,
+            screenTurnOffScheduleMode = "PLAY_HOURS",
+            screenTurnOffSchedules = listOf(TurnOffScheduleDto(days = emptyList(), startTime = "09:00", endTime = null)),
+            timezone = "Asia/Kolkata",
+        )
+        assertTrue(enforcer.evaluate(settings, at(11, 23)).displayOn)
+    }
+
+    @Test
     fun `an empty days array means every day, not no days`() {
         val settings = SettingsDto(
             screenTurnOffScheduleEnabled = AmsConstants.ACTIVE,

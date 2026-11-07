@@ -203,6 +203,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         append(plan.playlistId ?: plan.playlistName).append('|')
         append(plan.cluster?.batchId ?: "").append('|')
         append(plan.cluster?.loopOriginAtMs ?: "").append('|')
+        // Turning "Play in sync" on or off must take effect on a running screen: on joins the wall's
+        // loop, off goes back to this screen's own timing. Before this was part of the identity the
+        // player kept whatever it had until the next restart.
+        append(plan.cluster?.syncEnabled ?: "").append('|')
         append(plan.layouts.size).append('|')
         plan.layouts.forEach { layout ->
             append(layout.key).append(':').append(layout.durationMs).append(':')
