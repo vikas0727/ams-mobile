@@ -175,13 +175,13 @@ class MainActivity : ComponentActivity(), PlayerHost {
 
                     if (showDiagnostics) {
                         DiagnosticsOverlay(
-                            onClose = { diagnosticsVisible.value = false },
+                            onClose = { closeDiagnostics() },
                             onForceSync = { playerViewModel?.forceSync() },
                             onUnpair = {
                                 lifecycleScope.launch {
                                     DigiApp.graph(this@MainActivity).commands.clear()
                                     DigiApp.graph(this@MainActivity).pairing.unpair()
-                                    diagnosticsVisible.value = false
+                                    closeDiagnostics()
                                 }
                             },
                         )
@@ -201,12 +201,19 @@ class MainActivity : ComponentActivity(), PlayerHost {
     /**
      * Set once the on-device PIN has been entered, for as long as this Activity lives.
      *
-     * Per-session rather than remembered: `deviceProtection` exists so that site staff standing at
-     * a panel cannot reach diagnostics or unpair the screen, and a PIN that stayed satisfied across
-     * a reboot would protect nothing the morning after an engineer used it.
+     * Per visit rather than remembered: `deviceProtection` exists so that site staff standing at
+     * a panel cannot reach diagnostics or unpair the screen. This used to stay satisfied until the
+     * app restarted - on a box that runs for weeks, one engineer's visit unlocked diagnostics for
+     * everybody after them. Closing diagnostics now locks it again (see [closeDiagnostics]).
      */
     private val pinAccepted = MutableStateFlow(false)
     private val pinPrompt = MutableStateFlow(false)
+
+    /** Hide diagnostics and require the PIN again next time. */
+    private fun closeDiagnostics() {
+        diagnosticsVisible.value = false
+        pinAccepted.value = false
+    }
 
     /**
      * The app canvas rotation, in degrees.
@@ -279,7 +286,7 @@ class MainActivity : ComponentActivity(), PlayerHost {
         return when (keyCode) {
             KeyEvent.KEYCODE_INFO, KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_PROG_YELLOW -> {
                 if (diagnosticsVisible.value) {
-                    diagnosticsVisible.value = false
+                    closeDiagnostics()
                 } else {
                     // `deviceProtection` with a password set: the PIN prompt stands in front of
                     // diagnostics, which is where Unpair lives.
