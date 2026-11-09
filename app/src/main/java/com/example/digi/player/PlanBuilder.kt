@@ -321,6 +321,7 @@ fun SyncResponse.assetRequests(): List<MediaCache.Asset> {
                         mimeType = slide.mimeType,
                         mediaType = slide.mediaType,
                         expectedBytes = slide.sizeBytes,
+                        expectedSha256 = slide.sha256,
                     )
                 }
             }
@@ -340,6 +341,7 @@ fun SyncResponse.assetRequests(): List<MediaCache.Asset> {
                     mimeType = item.mimeType,
                     mediaType = item.mediaType,
                     expectedBytes = item.sizeBytes,
+                    expectedSha256 = item.sha256,
                 )
             }
         }

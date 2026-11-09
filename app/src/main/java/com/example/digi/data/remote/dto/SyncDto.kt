@@ -147,6 +147,9 @@ data class SlideDto(
     val width: Int? = null,
     val height: Int? = null,
     val sizeBytes: Long? = null,
+    /** SHA-256 (hex) of the exact file to download. The player checks every download against it and
+     *  refuses to play a file that does not match. Null for files the server has not hashed yet. */
+    val sha256: String? = null,
     val transition: String? = null,
     val transitionDurationMs: Int? = null,
     val muted: Int? = null,
@@ -225,6 +228,8 @@ data class ClusterItemDto(
     val sizeBytes: Long? = null,
     val url: String? = null,
     val cacheKey: String? = null,
+    /** See [SlideDto.sha256]. */
+    val sha256: String? = null,
     val durationSeconds: Double? = null,
     val fitMode: String? = null,
     val muted: Int? = null,

@@ -50,6 +50,13 @@ class MediaCache(
         val mimeType: String? = null,
         val mediaType: String? = null,
         val expectedBytes: Long? = null,
+        /**
+         * SHA-256 (hex) the manifest says this file must have. When set, a download that does not
+         * match is thrown away and never played - this is what stops a swapped or tampered file
+         * from reaching the wall even when it arrives over a perfectly valid signed URL. Null means
+         * the server has not hashed this file yet (older uploads), and nothing is checked.
+         */
+        val expectedSha256: String? = null,
     )
 
     /** @return true when the asset is on disk and playable. */
@@ -100,8 +107,14 @@ class MediaCache(
         }
 
         if (isReady(key)) {
-            dao.touch(listOf(key), ServerClock.now())
-            return@withContext Outcome.Ok
+            // Already on disk. If the manifest now carries a hash, make sure THIS file is the one it
+            // describes - a file replaced under the same name has the same cacheKey but a new hash.
+            if (verifyHeld(asset)) {
+                dao.touch(listOf(key), ServerClock.now())
+                return@withContext Outcome.Ok
+            }
+            // Wrong content: drop it and fall through to a fresh download.
+            dropHeld(key)
         }
 
         synchronized(inFlight) {
@@ -140,6 +153,8 @@ class MediaCache(
                 part.parentFile?.mkdirs()
                 var written = 0L
                 var lastReported = -1
+                val expectedHash = Checksum.normalise(asset.expectedSha256)
+                val digest = if (expectedHash != null) MessageDigest.getInstance("SHA-256") else null
 
                 body.byteStream().use { input ->
                     part.outputStream().use { output ->
@@ -148,6 +163,7 @@ class MediaCache(
                             val read = input.read(buffer)
                             if (read == -1) break
                             output.write(buffer, 0, read)
+                            digest?.update(buffer, 0, read)
                             written += read
                             if (total > 0) {
                                 val percent = ((written * 100) / total).toInt().coerceIn(0, 100)
@@ -160,6 +176,19 @@ class MediaCache(
                     }
                 }
 
+                if (digest != null && expectedHash != null) {
+                    val actual = Checksum.hex(digest.digest())
+                    if (actual != expectedHash) {
+                        part.delete()
+                        val reason = "Checksum mismatch for ${asset.fileName}: the file that arrived is not the " +
+                            "one the CMS published (expected ${expectedHash.take(12)}\u2026, got ${actual.take(12)}\u2026). " +
+                            "It was discarded and will not be played."
+                        AppLog.e(TAG, "Download rejected - $reason")
+                        markFailed(asset, target, reason)
+                        return@withContext Outcome.Failed(reason)
+                    }
+                }
+
                 if (target.exists()) target.delete()
                 if (!part.renameTo(target)) {
                     part.delete()
@@ -169,6 +198,7 @@ class MediaCache(
                     return@withContext Outcome.Failed(reason)
                 }
 
+                if (expectedHash != null) writeVerified(target, expectedHash)
                 dao.upsert(
                     baseRow(asset, target, AmsConstants.DownloadStatus.DOWNLOADED, 100)
                         .copy(sizeBytes = target.length())
@@ -190,6 +220,42 @@ class MediaCache(
         } finally {
             synchronized(inFlight) { inFlight.remove(key) }
         }
+    }
+
+    /**
+     * True when the file held for [asset] is the one the manifest describes.
+     *
+     * No hash in the manifest -> nothing to check, trust what is held (older uploads). With a hash:
+     * a small `.sha256` note next to the file records what it was verified against, so the common
+     * case (same hash as last time) costs a one-line read. Only when the note is missing or differs
+     * - first run after this feature, or the file was replaced - is the file hashed again.
+     */
+    private suspend fun verifyHeld(asset: Asset): Boolean {
+        val expected = Checksum.normalise(asset.expectedSha256) ?: return true
+        val file = localFile(asset.cacheKey) ?: return false
+        val note = verifiedNote(file)
+        if (note.exists() && runCatching { note.readText().trim() }.getOrNull() == expected) return true
+        val actual = runCatching { Checksum.sha256Of(file) }.getOrNull()
+        if (actual == expected) {
+            writeVerified(file, expected)
+            return true
+        }
+        AppLog.e(TAG, "Held file ${asset.fileName} does not match its published checksum - discarding it")
+        return false
+    }
+
+    private suspend fun dropHeld(cacheKey: String) {
+        val row = dao.find(cacheKey) ?: return
+        val file = File(row.localPath)
+        runCatching { file.delete() }
+        runCatching { verifiedNote(file).delete() }
+        dao.delete(cacheKey)
+    }
+
+    private fun verifiedNote(file: File) = File(file.absolutePath + VERIFIED_SUFFIX)
+
+    private fun writeVerified(file: File, hash: String) {
+        runCatching { verifiedNote(file).writeText(hash) }
     }
 
     /**
@@ -243,6 +309,7 @@ class MediaCache(
         var removed = 0
         for (row in stale) {
             if (runCatching { File(row.localPath).delete() }.getOrDefault(false) || !File(row.localPath).exists()) {
+                runCatching { verifiedNote(File(row.localPath)).delete() }
                 dao.delete(row.cacheKey)
                 removed++
             }
@@ -282,6 +349,7 @@ class MediaCache(
             if (keep.contains(row.cacheKey)) continue
             val file = File(row.localPath)
             if (runCatching { file.delete() }.getOrDefault(false) || !file.exists()) {
+                runCatching { verifiedNote(file).delete() }
                 dao.delete(row.cacheKey)
                 removed++
             } else {
@@ -296,7 +364,10 @@ class MediaCache(
         // and any file orphaned by a row that was lost to a destructive schema migration.
         val keptPaths = dao.all().map { it.localPath }.toHashSet()
         root.listFiles()?.forEach { file ->
-            if (file.absolutePath !in keptPaths) runCatching { file.delete() }
+            if (file.absolutePath in keptPaths) return@forEach
+            // The verification note of a file we are keeping stays with it.
+            if (file.name.endsWith(VERIFIED_SUFFIX) && file.absolutePath.removeSuffix(VERIFIED_SUFFIX) in keptPaths) return@forEach
+            runCatching { file.delete() }
         }
 
         if (removed > 0) {
@@ -380,6 +451,7 @@ class MediaCache(
 
     private companion object {
         const val TAG = "MediaCache"
+        const val VERIFIED_SUFFIX = ".sha256"
         const val DEFAULT_GRACE_MS = 24L * 60 * 60 * 1000
     }
 }

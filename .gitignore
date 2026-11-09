@@ -12,3 +12,6 @@
 .cxx
 local.properties
 /app/schemas
+# Release signing keystores - keep them outside the repo (see README section 6)
+*.jks
+*.keystore
