@@ -30,3 +30,16 @@ digi.aesIv=PUT_THE_BACKEND_AES_IV_HERE
 
 # Set false only if /api/v1/player is ever added to server.js's cryptoBypassRoutes.
 digi.aesEnabled=true
+
+# ── Version ───────────────────────────────────────────────────────────────────
+# build-apk <env> <code> <name> overrides these for one build. versionCode must go up every release.
+#ams.versionCode=1
+#ams.versionName=1.0.0
+
+# ── Release signing (UAT and PROD APKs) ───────────────────────────────────────
+# The keystore lives OUTSIDE the repo; forward slashes work on Windows. Use the same keystore for
+# every release, forever - Android will not update an app signed with a different key.
+#ams.signing.storeFile=D:/Keys/ams-player-release.jks
+#ams.signing.storePassword=
+#ams.signing.keyAlias=ams-player
+#ams.signing.keyPassword=

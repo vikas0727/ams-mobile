@@ -57,9 +57,11 @@ fun buildValue(key: String, fallback: String): String =
  * The three builds - dev, uat, prod - as product flavors. Each carries its own API address, its own
  * public encryption key and its own app name, so choosing an environment is choosing a Gradle task:
  *
- *   ./gradlew assembleProdRelease     ->  app/build/outputs/apk/prod/release/app-prod-release.apk
- *   ./gradlew assembleUatRelease      ->  app/build/outputs/apk/uat/release/app-uat-release.apk
- *   ./gradlew assembleDevDebug        ->  app/build/outputs/apk/dev/debug/app-dev-debug.apk
+ *   build-apk prod 2 1.0.1   (./gradlew apkProd)  ->  dist/AMS-Player-prod-1.0.1-release.apk, signed
+ *   build-apk uat  2 1.0.1   (./gradlew apkUat)   ->  dist/AMS-Player-uat-1.0.1-release.apk, signed
+ *   build-apk dev            (./gradlew apkDev)   ->  dist/AMS-Player-dev-1.0.0-debug.apk
+ *
+ * (the apk* tasks are defined at the end of this file).
  *
  * The address comes from `ams.<flavor>.apiBaseUrl` in local.properties, else the older
  * `digi.apiBaseUrl`, else the default below. UAT and PROD have no committed default: set them in
@@ -88,6 +90,41 @@ val committedServerKeys = Properties().apply {
 fun envValue(env: String, name: String, fallback: String): String =
     (localProps.getProperty("ams.$env.$name") ?: project.findProperty("ams.$env.$name") as String? ?: fallback).trim()
 
+fun apiBaseUrlFor(env: PlayerEnv): String =
+    envValue(env.name, "apiBaseUrl", buildValue("digi.apiBaseUrl", env.apiBaseUrl))
+
+fun serverKeyFor(env: PlayerEnv): String =
+    envValue(env.name, "cryptoServerKey", committedServerKeys.getProperty(env.name, ""))
+
+/*
+ * Version, from local.properties or -P (build-apk passes them):
+ *   ams.versionCode=2        must go up on every release, or Android refuses the update
+ *   ams.versionName=1.0.1
+ */
+val appVersionCode = buildValue("ams.versionCode", "1").toInt()
+val appVersionName = buildValue("ams.versionName", "1.0.0")
+
+/*
+ * Release signing - the keystore and its passwords stay outside the repo (README section 6):
+ *   ams.signing.storeFile=D:/Keys/ams-player-release.jks
+ *   ams.signing.storePassword=...
+ *   ams.signing.keyAlias=ams-player
+ *   ams.signing.keyPassword=...
+ * in local.properties, or the environment variables AMS_SIGNING_STORE_FILE, AMS_SIGNING_STORE_PASSWORD,
+ * AMS_SIGNING_KEY_ALIAS and AMS_SIGNING_KEY_PASSWORD (for a build server). Without them release
+ * builds still assemble, unsigned, for signing by hand; the apkUat / apkProd tasks refuse.
+ */
+fun signingValue(key: String, envVar: String): String? =
+    (localProps.getProperty("ams.signing.$key") ?: project.findProperty("ams.signing.$key") as String?
+        ?: System.getenv(envVar))?.trim()?.takeIf { it.isNotEmpty() }
+
+val releaseStoreFile = signingValue("storeFile", "AMS_SIGNING_STORE_FILE")?.let { rootProject.file(it) }
+val releaseStorePassword = signingValue("storePassword", "AMS_SIGNING_STORE_PASSWORD")
+val releaseKeyAlias = signingValue("keyAlias", "AMS_SIGNING_KEY_ALIAS")
+val releaseKeyPassword = signingValue("keyPassword", "AMS_SIGNING_KEY_PASSWORD")
+val releaseSigningReady = releaseStoreFile?.isFile == true &&
+    releaseStorePassword != null && releaseKeyAlias != null && releaseKeyPassword != null
+
 android {
     namespace = "com.example.digi"
     compileSdk = 36
@@ -96,8 +133,8 @@ android {
         applicationId = "com.example.digi"
         minSdk = 24
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = appVersionCode
+        versionName = appVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -117,15 +154,20 @@ android {
                 dimension = "env"
                 if (env.name != "prod") versionNameSuffix = "-${env.name}"
                 buildConfigField("String", "APP_ENV", "\"${env.name}\"")
-                buildConfigField(
-                    "String", "API_BASE_URL",
-                    "\"${envValue(env.name, "apiBaseUrl", buildValue("digi.apiBaseUrl", env.apiBaseUrl))}\"",
-                )
-                buildConfigField(
-                    "String", "CRYPTO_SERVER_KEY",
-                    "\"${envValue(env.name, "cryptoServerKey", committedServerKeys.getProperty(env.name, ""))}\"",
-                )
+                buildConfigField("String", "API_BASE_URL", "\"${apiBaseUrlFor(env)}\"")
+                buildConfigField("String", "CRYPTO_SERVER_KEY", "\"${serverKeyFor(env)}\"")
                 resValue("string", "app_name", env.appName)
+            }
+        }
+    }
+
+    signingConfigs {
+        if (releaseSigningReady) {
+            create("release") {
+                storeFile = releaseStoreFile
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
             }
         }
     }
@@ -135,6 +177,7 @@ android {
             isMinifyEnabled = false
         }
         release {
+            if (releaseSigningReady) signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -164,6 +207,87 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+}
+
+// APK file names: AMS-Player-<env>-<versionName>-<buildType>.apk, e.g. AMS-Player-prod-1.0.1-release.apk
+@Suppress("DEPRECATION")
+android.applicationVariants.all {
+    val variant = this
+    outputs.all {
+        (this as com.android.build.gradle.internal.api.BaseVariantOutputImpl).outputFileName =
+            "AMS-Player-${variant.flavorName}-$appVersionName-${variant.buildType.name}.apk"
+    }
+}
+
+/*
+ * One command per environment. Each builds that environment's APK and copies it to dist/ at the
+ * project root:
+ *
+ *   ./gradlew apkDev     dev,  debug build (plain http to the dev API is allowed)
+ *   ./gradlew apkUat     uat,  release build, signed
+ *   ./gradlew apkProd    prod, release build, signed
+ *   ./gradlew apkAll     all three
+ *
+ * build-apk.cmd / build-apk.sh wrap these and take the version too. Before building, the task checks
+ * what would otherwise make a useless APK - no signing key, or no real API address for UAT/PROD -
+ * and stops with the fix instead.
+ */
+data class ApkTarget(val env: PlayerEnv, val buildType: String)
+
+val apkTargets = listOf(
+    ApkTarget(playerEnvs.first { it.name == "dev" }, "debug"),
+    ApkTarget(playerEnvs.first { it.name == "uat" }, "release"),
+    ApkTarget(playerEnvs.first { it.name == "prod" }, "release"),
+)
+val distDir = rootProject.layout.projectDirectory.dir("dist")
+
+fun String.cap() = replaceFirstChar { it.uppercase() }
+
+val apkTasks = apkTargets.map { target ->
+    val env = target.env.name
+    val variantName = "$env${target.buildType.cap()}"
+    val apiUrl = apiBaseUrlFor(target.env)
+    val problems = buildList {
+        if (target.buildType == "release" && !releaseSigningReady) {
+            add("release signing is not set up - add ams.signing.storeFile, storePassword, keyAlias and keyPassword to local.properties (README section 6)")
+        }
+        if (apiUrl.contains(".invalid")) add("set ams.$env.apiBaseUrl in local.properties")
+        if (target.buildType == "release" && !apiUrl.startsWith("https://")) {
+            add("ams.$env.apiBaseUrl must be an https:// address - release builds are HTTPS-only")
+        }
+    }
+    val hasServerKey = serverKeyFor(target.env).isNotEmpty()
+
+    val check = tasks.register("checkApk${env.cap()}") {
+        group = "ams"
+        description = "Checks the $env build settings before building its APK."
+        doLast {
+            if (problems.isNotEmpty()) {
+                throw GradleException("Cannot build the $env APK:\n  - " + problems.joinToString("\n  - "))
+            }
+            if (!hasServerKey) {
+                logger.warn("[ams] No API public key for '$env' in crypto-server-keys.properties - this build will use legacy encryption only.")
+            }
+        }
+    }
+    tasks.matching { it.name == "pre${variantName.cap()}Build" }.configureEach { mustRunAfter(check) }
+
+    tasks.register<Copy>("apk${env.cap()}") {
+        group = "ams"
+        description = "Builds the $env APK (${target.buildType}) and copies it to dist/."
+        dependsOn(check, "assemble${variantName.cap()}")
+        from(layout.buildDirectory.dir("outputs/apk/$env/${target.buildType}")) { include("AMS-Player-$env-$appVersionName-*.apk") }
+        into(distDir)
+        doLast {
+            logger.lifecycle("[ams] $env APK: ${distDir.asFile}${File.separator}AMS-Player-$env-$appVersionName-${target.buildType}.apk")
+        }
+    }
+}
+
+tasks.register("apkAll") {
+    group = "ams"
+    description = "Builds the dev, uat and prod APKs into dist/."
+    dependsOn(apkTasks)
 }
 
 ksp {

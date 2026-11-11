@@ -15,3 +15,6 @@ local.properties
 # Release signing keystores - keep them outside the repo (see README section 6)
 *.jks
 *.keystore
+
+# APKs from build-apk / ./gradlew apkDev|apkUat|apkProd
+/dist

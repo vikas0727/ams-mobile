@@ -88,10 +88,32 @@ Use `--env uat` / `--env dev` for the others; `--force` makes new keys (then eve
 environment must be rebuilt and reinstalled). Commit the updated `crypto-server-keys.properties`.
 Details: API README §3.3.
 
-## 5. Build flavors and debug builds
+## 5. Building the APKs — one command per environment
 
 One flavor per environment. Each has its own API address, pinned API key, app name and `APP_ENV`;
 the package name stays `com.example.digi` for all of them (so a box holds one at a time).
+
+| Command (Windows) | Command (Linux/macOS) | Builds | Output in `dist\` |
+| --- | --- | --- | --- |
+| `build-apk dev` | `./build-apk.sh dev` | dev, debug | `AMS-Player-dev-<version>-debug.apk` |
+| `build-apk uat 2 1.0.1` | `./build-apk.sh uat 2 1.0.1` | uat, signed release | `AMS-Player-uat-1.0.1-release.apk` |
+| `build-apk prod 2 1.0.1` | `./build-apk.sh prod 2 1.0.1` | prod, signed release | `AMS-Player-prod-1.0.1-release.apk` |
+| `build-apk all 2 1.0.1` | `./build-apk.sh all 2 1.0.1` | all three | all three |
+
+The two numbers are optional: `versionCode` (must go up on every release) and `versionName`. Left
+out, they come from `ams.versionCode` / `ams.versionName` in `local.properties`, else `1` / `1.0.0`.
+Run the scripts from the `ams-mobile` folder (PowerShell needs `.\build-apk uat …`).
+
+The scripts call the Gradle tasks `apkDev`, `apkUat`, `apkProd` and `apkAll` (group **ams** in
+Android Studio's Gradle panel), so `.\gradlew apkProd -Pams.versionCode=2 -Pams.versionName=1.0.1`
+does the same. Before building, each task checks its settings and stops with the fix if:
+
+- UAT/PROD signing is not set up (section 6);
+- `ams.uat.apiBaseUrl` / `ams.prod.apiBaseUrl` is missing, or is not `https://` (release builds are
+  HTTPS-only).
+
+A missing API public key in `crypto-server-keys.properties` is only a warning: that build falls back
+to legacy encryption.
 
 | Flavor | App name | Version suffix |
 | --- | --- | --- |
@@ -99,14 +121,13 @@ the package name stays `com.example.digi` for all of them (so a box holds one at
 | `uat` | AMS Player UAT | `-uat` |
 | `prod` | AMS Player | — |
 
-In Android Studio pick the variant in **Build ▸ Select Build Variant** (`devDebug`, `uatRelease`,
-`prodRelease`, …). From the command line:
+In Android Studio you can also pick a variant in **Build ▸ Select Build Variant** (`devDebug`,
+`uatRelease`, `prodRelease`, …) and run it. Other useful commands:
 
 ```powershell
-.\gradlew assembleDevDebug                 # app\build\outputs\apk\dev\debug\app-dev-debug.apk
 .\gradlew assembleUatDebug                 # debug build against UAT (allows http + user CAs)
 .\gradlew test                             # unit tests: AES + v2 session cipher vectors, scheduler, schedule rules
-adb install -r app\build\outputs\apk\dev\debug\app-dev-debug.apk
+adb install -r dist\AMS-Player-dev-1.0.0-debug.apk
 ```
 
 Then generate a pairing code for a screen in the CMS and enter it on the box (on-screen grid, D-pad
@@ -116,11 +137,11 @@ navigable). The Postman collection
 For a real box against your PC: allow inbound TCP 5000 in the Windows firewall and keep the box on
 the same network — that is the usual first-pairing failure.
 
-## 6. Release builds and signing
+## 6. Release signing (UAT and PROD)
 
-The release build type is minified (R8) and has **no signing config in Gradle**, so it must be
-signed with your release key. Use the **same keystore for every release, forever** — Android refuses
-to update an app signed with a different key.
+UAT and PROD APKs are release builds, minified (R8) and signed with your release key. Use the
+**same keystore for every release, forever** — Android refuses to update an app signed with a
+different key.
 
 ### 6.1 Create the release keystore (once)
 
@@ -134,25 +155,37 @@ It asks for a keystore password, a key password and a name. Keep the `.jks` **ou
 and store it and both passwords in a password manager — a lost keystore means every box must
 uninstall and re-pair to take a new build.
 
-### 6.2 Build a signed APK — Android Studio (simplest)
+### 6.2 Tell the build about it (once per machine)
 
-1. **Build ▸ Generate Signed App Bundle / APK… ▸ APK ▸ Next**
-2. Choose `D:\Keys\ams-player-release.jks`, alias `ams-player`, enter the passwords.
-3. Build variant **`prodRelease`** (or `uatRelease`) ▸ **Create**.
-4. The APK is in `app\prod\release\` (Android Studio shows a *locate* link).
+Add to `local.properties` (git-ignored — never commit these):
 
-### 6.3 Build a signed APK — command line
-
-```powershell
-.\gradlew assembleProdRelease
-$bt = "$env:LOCALAPPDATA\Android\Sdk\build-tools\36.0.0"          # your installed version
-& "$bt\zipalign.exe" -v -p 4 app\build\outputs\apk\prod\release\app-prod-release-unsigned.apk app-prod-aligned.apk
-& "$bt\apksigner.bat" sign --ks D:\Keys\ams-player-release.jks --ks-key-alias ams-player `
-  --out ams-player-prod.apk app-prod-aligned.apk
-& "$bt\apksigner.bat" verify --print-certs ams-player-prod.apk
+```properties
+ams.signing.storeFile=D:/Keys/ams-player-release.jks
+ams.signing.storePassword=<keystore password>
+ams.signing.keyAlias=ams-player
+ams.signing.keyPassword=<key password>
 ```
 
-Same for UAT with `assembleUatRelease` and the `uat` paths.
+On a build server, use the environment variables `AMS_SIGNING_STORE_FILE`,
+`AMS_SIGNING_STORE_PASSWORD`, `AMS_SIGNING_KEY_ALIAS` and `AMS_SIGNING_KEY_PASSWORD` instead.
+From then on `build-apk uat` / `build-apk prod` produce installable, signed APKs. Check one with:
+
+```powershell
+& "$env:LOCALAPPDATA\Android\Sdk\build-tools\36.0.0\apksigner.bat" verify --print-certs dist\AMS-Player-prod-1.0.1-release.apk
+```
+
+### 6.3 Without signing in Gradle
+
+If you'd rather not keep the passwords on the machine, `.\gradlew assembleProdRelease` still builds
+an unsigned APK into `app\build\outputs\apk\prod\release\`. Sign it with Android Studio
+(**Build ▸ Generate Signed App Bundle / APK…**) or by hand:
+
+```powershell
+$bt = "$env:LOCALAPPDATA\Android\Sdk\build-tools\36.0.0"          # your installed version
+& "$bt\zipalign.exe" -v -p 4 app\build\outputs\apk\prod\release\AMS-Player-prod-1.0.0-release.apk aligned.apk
+& "$bt\apksigner.bat" sign --ks D:\Keys\ams-player-release.jks --ks-key-alias ams-player `
+  --out AMS-Player-prod-1.0.0-release-signed.apk aligned.apk
+```
 
 ## 7. Installing on the boxes
 
@@ -160,14 +193,14 @@ Same for UAT with `assembleUatRelease` and the `uat` paths.
 
 ```powershell
 adb connect <box-ip>:5555
-adb install -r ams-player-prod.apk
+adb install -r dist\AMS-Player-prod-1.0.1-release.apk
 ```
 
 **Download link:** host the APK on the **CMS** host, not the API host, e.g. copy it to the server's
 CMS folder and link `https://<cms host>/downloads/ams-player.apk`:
 
 ```powershell
-scp -i C:\keys\<server>.pem ams-player-prod.apk <user>@<server>:/var/www/ams-frontend/downloads/ams-player.apk
+scp -i C:\keys\<server>.pem dist\AMS-Player-prod-1.0.1-release.apk <user>@<server>:/var/www/ams-frontend/downloads/ams-player.apk
 ```
 
 (Copy it again after each CMS deploy if your CMS deploy replaces the whole folder.)
@@ -181,9 +214,10 @@ deployed — then the players (API README §11).
 
 ## 8. Releasing an update
 
-1. Raise `versionCode` (and `versionName`) in `app/build.gradle.kts` — Android will not install a
-   build whose `versionCode` is not higher than the installed one.
-2. Build and sign with the same keystore (section 6).
+1. Pick the next `versionCode` (and `versionName`) — Android will not install a build whose
+   `versionCode` is not higher than the installed one.
+2. `build-apk prod <versionCode> <versionName>` (or set `ams.versionCode` / `ams.versionName` in
+   `local.properties`); it signs with the same keystore (section 6).
 3. Install with `adb install -r …` or replace the APK at the download link. (`UPDATE_APP` from the
    CMS is not implemented — section 13.)
 
