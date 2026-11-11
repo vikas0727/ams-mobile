@@ -49,9 +49,41 @@ class PairingRepository(
      * "SSLHandshakeException" tells them to check the certificate or the tablet's date, which is
      * the difference between a five-minute fix and a phone call.
      */
+    /**
+     * The cause in words the person at the box can act on. The server address itself is never
+     * shown - it stays in the log (`adb logcat -s Pairing`).
+     */
     private fun reasonHint(cause: Throwable?): String {
-        val name = cause?.let { it::class.java.simpleName }?.takeIf { it.isNotBlank() } ?: return ""
-        return "\n($name)"
+        if (cause == null) return ""
+        val chain = generateSequence(cause) { it.cause }.take(6).toList()
+        val text = chain.joinToString(" ") { it.message.orEmpty() }
+        fun has(type: Class<*>) = chain.any { type.isInstance(it) }
+        val reason = when {
+            has(java.net.UnknownHostException::class.java) ->
+                "Server name not found - check the box has internet and DNS."
+            has(java.net.SocketTimeoutException::class.java) ->
+                "The server did not answer in time - check the network or firewall."
+            has(java.net.ConnectException::class.java) ->
+                "The server refused the connection - is the API running and the port open?"
+            text.contains("CLEARTEXT", ignoreCase = true) ->
+                "This build only allows https - use a debug build for an http server."
+            has(javax.net.ssl.SSLException::class.java) ||
+                has(java.security.cert.CertificateException::class.java) ->
+                "Secure connection failed - check the server's certificate and the box's date and time."
+            text.contains("could not prove its identity") ->
+                "Server key does not match this app - this APK was built for a different environment."
+            text.contains("Encryption handshake failed") ->
+                "The server rejected the secure session (${text.substringAfter("(").substringBefore(")")})."
+            has(java.net.NoRouteToHostException::class.java) ->
+                "No route to the server - check the box's network connection."
+            else -> {
+                // Messages like "Failed to connect to <host>" would put the address on screen.
+                val host = runCatching { java.net.URI(BuildConfig.API_BASE_URL).host }.getOrNull().orEmpty()
+                cause.message?.takeIf { it.isNotBlank() && (host.isEmpty() || !it.contains(host)) }
+                    ?: cause::class.java.simpleName
+            }
+        }
+        return "\n$reason"
     }
 
     fun deviceId(): String {
